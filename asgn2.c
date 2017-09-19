@@ -70,6 +70,7 @@ static struct gpio gpio_dummy[] = {
 };
 
 static int dummy_irq;
+
 extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
 
 static inline u32
@@ -626,7 +627,8 @@ int gpio_dummy_init(void)
     dummy_irq = ret;
     printk(KERN_WARNING "Successfully requested IRQ# %d for %s\n", dummy_irq, gpio_dummy[ARRAY_SIZE(gpio_dummy)-1].label);
     
-    ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
+	ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
+//    ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "asgn2", &asgn2_device);
     
     if(ret) {
         printk(KERN_ERR "Unable to request IRQ for dummy device: %d\n", ret);
@@ -648,7 +650,19 @@ void gpio_dummy_exit(void)
     gpio_free_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
     iounmap((void *)gpio_dummy_base);
 }
-
+u8 msbit=0;
+int odd=1;
+irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
+	u8 half=read_half_byte();
+	if(odd){
+		msbit=half;
+	}else{
+		char ascii=(char)msbit<<4|half;
+		printk(KERN_WARNING"input char: %c",ascii);
+	}
+	odd=!odd;
+	return IRQ_HANDLED;
+}
 
 /**
  * Initialise the module and create the master device
@@ -709,11 +723,13 @@ int __init asgn2_init_module(void){
     
     /*create proc entry*/
     proc = proc_create_data(MYDEV_NAME, 0, NULL, &asgn2_proc_ops, NULL);
-    
+
+	/*initialize GPIO device*/
+	printk(KERN_WARNING "creating GPIO device\n");
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
     
-    return 0;
+	return gpio_dummy_init();
 }
 
 
