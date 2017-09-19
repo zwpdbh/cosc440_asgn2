@@ -69,6 +69,7 @@ static struct gpio gpio_dummy[] = {
     { 27, GPIOF_IN, "GPIO27" },
 };
 
+
 static int dummy_irq;
 
 extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
@@ -144,6 +145,71 @@ typedef struct page_node_rec {
     struct list_head list;
     struct page *page;
 } page_node;
+
+/*define my circular buffer*/
+typedef struct circular_buffer *buffer;
+struct circular_buffer {
+	struct page *page;
+	int head;
+	int tail;
+};
+
+buffer bf;
+
+/*helper function on my buffer*/
+buffer circular_buffer_new(void) {
+	buffer bf;
+	bf = kmalloc(sizeof(struct circular_buffer), GFP_KERNEL);
+	bf->page = alloc_page(GFP_KERNEL);
+	bf->head = 0;
+	bf->tail = 0;
+
+	return bf;
+}
+
+/*helper function write one byte*/
+void circular_buffer_write(char data) {
+	char *a;
+	if(bf->head+1 == bf->tail)return;
+	a=(char*)(page_address(bf->page)+bf->head);
+	
+	*a = data;
+
+	bf->head += 1;
+	bf->head = bf->head%PAGE_SIZE;
+}
+
+/*helper function read one byte*/
+char circular_buffer_read(void){
+	char *c;
+	if(bf->tail+1 == bf->head)return '\0';
+	c = (char *)(page_address(bf->page)+bf->tail);
+	bf->tail++;
+	bf->tail = bf->tail%PAGE_SIZE;
+	return *c;
+}
+
+/*release my buffer*/
+void circular_buffer_free(buffer bf) {
+	__free_page(bf->page);
+	kfree(bf);
+}
+
+/*print out the content in the buffer*/
+void circular_buffer_print(void) {
+	int count;
+	int index;
+	char *c;
+	index = bf->tail;
+	for (count = 0; count < PAGE_SIZE - 1; count++) {
+		if(index == bf->head)
+			break;
+		c = (char *) (page_address(bf->page)+index);
+		printk(KERN_WARNING "index: %d, char *c = %c.\n", index, *c);
+		index++;
+		index = index % PAGE_SIZE;
+	}
+}
 
 
 typedef struct asgn2_dev_t {
@@ -628,14 +694,16 @@ int gpio_dummy_init(void)
     printk(KERN_WARNING "Successfully requested IRQ# %d for %s\n", dummy_irq, gpio_dummy[ARRAY_SIZE(gpio_dummy)-1].label);
     
 	ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
-//    ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "asgn2", &asgn2_device);
     
     if(ret) {
         printk(KERN_ERR "Unable to request IRQ for dummy device: %d\n", ret);
         goto fail1;
     }
     write_to_gpio(15);
-    return 0;
+	
+	bf = circular_buffer_new();
+    
+	return 0;
     
 fail1:
     gpio_free_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
@@ -658,7 +726,11 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
 		msbit=half;
 	}else{
 		char ascii=(char)msbit<<4|half;
-		printk(KERN_WARNING"input char: %c",ascii);
+		printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
+		circular_buffer_write(ascii);
+		printk(KERN_WARNING "===After writing, the content of circular_buffer is:===\n");
+		circular_buffer_print();
+		printk(KERN_WARNING "===End of printing the content of circular_buffer.\n\n");
 	}
 	odd=!odd;
 	return IRQ_HANDLED;
@@ -748,6 +820,7 @@ void __exit asgn2_exit_module(void){
     unregister_chrdev_region(MKDEV(asgn2_major, 0), 1);
     printk(KERN_WARNING "===release GPIO device\n");
     gpio_dummy_exit();
+	circular_buffer_free(bf);
     printk(KERN_WARNING "===GOOD BYE from %s===\n", MYDEV_NAME);
     
 }
