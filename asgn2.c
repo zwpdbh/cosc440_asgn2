@@ -149,68 +149,119 @@ typedef struct page_node_rec {
 /*define my circular buffer*/
 typedef struct circular_buffer *buffer;
 struct circular_buffer {
-	struct page *page;
-	int head;
-	int tail;
+    struct page *page;
+    int head;
+    int tail;
 };
 
 buffer bf;
 
 /*helper function on my buffer*/
 buffer circular_buffer_new(void) {
-	buffer bf;
-	bf = kmalloc(sizeof(struct circular_buffer), GFP_KERNEL);
-	bf->page = alloc_page(GFP_KERNEL);
-	bf->head = 0;
-	bf->tail = 0;
-
-	return bf;
+    buffer bf;
+    bf = kmalloc(sizeof(struct circular_buffer), GFP_KERNEL);
+    bf->page = alloc_page(GFP_KERNEL);
+    bf->head = 0;
+    bf->tail = 0;
+    
+    return bf;
 }
 
 /*helper function write one byte*/
 void circular_buffer_write(char data) {
-	char *a;
-	if(bf->head+1 == bf->tail)return;
-	a=(char*)(page_address(bf->page)+bf->head);
-	
-	*a = data;
+    char *a;
+    if((bf->head+1) % PAGE_SIZE == bf->tail) {
+        printk(KERN_WARNING "circular buffer is full, just return\n");
+        return;
+    }
 
-	bf->head += 1;
-	bf->head = bf->head%PAGE_SIZE;
+    
+    a=(char*)(page_address(bf->page)+bf->head);
+    
+    *a = data;
+    
+    bf->head += 1;
+    bf->head = bf->head%PAGE_SIZE;
 }
 
 /*helper function read one byte*/
 char circular_buffer_read(void){
-	char *c;
-	if(bf->tail+1 == bf->head)return '\0';
-	c = (char *)(page_address(bf->page)+bf->tail);
-	bf->tail++;
-	bf->tail = bf->tail%PAGE_SIZE;
-	return *c;
+    char *c;
+
+    c = (char *)(page_address(bf->page)+bf->tail);
+    bf->tail += 1;
+    bf->tail = bf->tail % PAGE_SIZE;
+    return *c;
 }
 
 /*release my buffer*/
 void circular_buffer_free(buffer bf) {
-	__free_page(bf->page);
-	kfree(bf);
+    __free_page(bf->page);
+    kfree(bf);
 }
 
 /*print out the content in the buffer*/
 void circular_buffer_print(void) {
-	int count;
-	int index;
-	char *c;
-	index = bf->tail;
-	for (count = 0; count < PAGE_SIZE - 1; count++) {
-		if(index == bf->head)
-			break;
-		c = (char *) (page_address(bf->page)+index);
-		printk(KERN_WARNING "index: %d, char *c = %c.\n", index, *c);
-		index++;
-		index = index % PAGE_SIZE;
-	}
+    int count;
+    int index;
+    char *c;
+    index = bf->tail;
+    for (count = 0; count < PAGE_SIZE - 1; count++) {
+        if(index == bf->head)
+            break;
+        c = (char *) (page_address(bf->page)+index);
+        printk(KERN_WARNING "index: %d, char *c = %c.\n", index, *c);
+        index++;
+        index = index % PAGE_SIZE;
+    }
 }
 
+/*define my tasklet and tasklet handler*/
+void my_tasklet_handler(unsigned long tasklet_data) {
+
+    char c;
+    printk(KERN_WARNING "\n");
+    printk(KERN_WARNING "=executing tasklet handler...=\n");
+    printk(KERN_WARNING "bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
+    if(bf->tail == bf->head) {
+        printk(KERN_WARNING "becuase bf->tail == bf->head, just return, no schedule tasklet\n");
+        return;
+    } else {
+        c =  circular_buffer_read();
+        printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
+        printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
+        printk(KERN_WARNING "at bottom half, read data from circular buffer into page pool\n");
+        
+        printk(KERN_WARNING "=next, read data from page pool=\n");
+        printk(KERN_WARNING "\n");
+    }
+
+}
+
+DECLARE_TASKLET(my_tasklet, my_tasklet_handler, 0);
+
+u8 msbit=0;
+
+int odd=1;
+
+irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
+    u8 half=read_half_byte();
+    if(odd){
+        msbit=half;
+    }else{
+        char ascii=(char)msbit<<4|half;
+        printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
+        circular_buffer_write(ascii);
+        
+        tasklet_schedule(&my_tasklet);
+    }
+    odd=!odd;
+    return IRQ_HANDLED;
+}
+
+/*==========================================================================*/
+/*==========================================================================*/
+/*==========================================================================*/
 
 typedef struct asgn2_dev_t {
     dev_t dev;            /* the device */
@@ -440,127 +491,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
 
 
-
-
-
-
-
-/**
- * This function writes from the user buffer to the virtual disk of this
- * module
- */
-//ssize_t asgn2_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
-//
-//    /*record offset in current page*/
-//    size_t offset;
-//
-//    size_t unfinished;
-//    size_t result;
-//    size_t finished;
-//    size_t total_finished;
-//
-//
-//    /*page_no = *f_pos / PAGE_SIZE, while curr_page_index is used to track which page */
-//    int page_index;
-//    int curr_page_index;
-//
-//    //struct asgn2_dev_t *dev;
-//    //dev = filp->private_data;
-//    struct list_head *ptr;
-//    struct page_node_rec *page_ptr;
-//    size_t orig_f_pos = *f_pos;
-//    int processing_count = 0;
-//
-//    unfinished = count;
-//    total_finished = 0;
-//
-//    printk(KERN_WARNING "======WRITING========\n");
-//    /*initializ*/
-//    page_index = *f_pos / PAGE_SIZE;
-//    offset = *f_pos % PAGE_SIZE;
-//    curr_page_index = 0;
-//
-//    /*if the *f_pos exceed the max limit, return 0*/
-//    if (page_index >= asgn2_device.num_pages) {
-//        printk(KERN_WARNING "request page_index is: %d\n", page_index);
-//        printk(KERN_WARNING "currently, there are: %d pages\n", asgn2_device.num_pages);
-//        printk(KERN_WARNING "need to add %d pages\n", page_index - asgn2_device.num_pages + 1);
-//        add_pages(page_index - asgn2_device.num_pages + 1);
-//    }
-//
-//    if(*f_pos > asgn2_device.num_pages * PAGE_SIZE) {
-//        printk(KERN_WARNING "*f_pos > asgn2_device.num_pages * PAGE_SIZE ?\n");
-//        printk(KERN_WARNING "*fpos = %ld\n", (long)*f_pos);
-//        printk(KERN_WARNING "asgn2_device.num_pages = %d\n", asgn2_device.num_pages);
-//        printk(KERN_WARNING "asgn2_device.num_pages * PAGE_SIZE = %ld\n", (long)asgn2_device.num_pages * PAGE_SIZE);
-//        return 0;
-//    }
-//
-//    ptr = asgn2_device.mem_list.next;
-//    /*make sure the current operating page is the page computed from *f_pos*/
-//    while (curr_page_index < page_index && ptr){
-//        ptr = ptr->next;
-//        curr_page_index += 1;
-//    }
-//
-//    printk(KERN_WARNING "===unfinished = %d...===\n", (int)unfinished);
-//    do {
-//        page_index = *f_pos / PAGE_SIZE;
-//        offset = *f_pos % PAGE_SIZE;
-//
-//        printk(KERN_WARNING "offset = %d\n", offset);
-//        printk(KERN_WARNING "*f_pos = %ld\n", (long int)*f_pos);
-//        printk(KERN_WARNING "page_index = *f_pos / PAGE_SIZE = %d\n", page_index);
-//
-//        if (page_index + 1 > asgn2_device.num_pages) {
-//            printk(KERN_WARNING "page_index = %d, while asgn2_device.num_pages = %d, need to add a new page.\n", page_index,  asgn2_device.num_pages);
-//            add_pages(1);
-//            ptr = ptr->next;
-//            curr_page_index += 1;
-//            printk(KERN_WARNING "go to next page: %d\n", curr_page_index);
-//        } else if (page_index + 1 <= asgn2_device.num_pages && page_index > curr_page_index) {
-//            printk(KERN_WARNING "page_index = %d, while curr_page_index = %d, need to move to next page.\n", page_index, curr_page_index);
-//            ptr = ptr->next;
-//            curr_page_index += 1;
-//            printk(KERN_WARNING "go to next page: %d\n", curr_page_index);
-//        }
-//
-//        page_ptr = list_entry(ptr, page_node, list);
-//
-//        if (unfinished < PAGE_SIZE - offset) {
-//            printk(KERN_WARNING "processing %ld amout of data(unfinished)\n", (long int)unfinished);
-//            result = copy_from_user(page_address(page_ptr->page) + offset, buf + total_finished, unfinished);
-//            finished = unfinished - result;
-//        } else {
-//            printk(KERN_WARNING "processing %ld amout of data(PAGE_SIZE - offset)\n", (long)(PAGE_SIZE - offset));
-//            result = copy_from_user(page_address(page_ptr->page) + offset, buf + total_finished, PAGE_SIZE - offset);
-//            finished = PAGE_SIZE - offset - result;
-//        }
-//
-//        if (result < 0) {
-//            break;
-//        }
-//
-//        unfinished -= finished;
-//        total_finished += finished;
-//        *f_pos += finished;
-//        processing_count += 1;
-//
-//        printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
-//        printk(KERN_WARNING "finished = %d\n", finished);
-//        printk(KERN_WARNING "unfinished = %d\n", unfinished);
-//        printk(KERN_WARNING "total_finished = %d\n", total_finished);
-//        printk(KERN_WARNING "\n");
-//    } while (unfinished > 0);
-//
-//    asgn2_device.data_size = max(asgn2_device.data_size, orig_f_pos + total_finished);
-//    printk(KERN_WARNING "===END of WRITING, return %d===\n", total_finished);
-//    printk(KERN_WARNING "\n\n\n");
-//
-//    return total_finished;
-//
-//}
-
 #define SET_NPROC_OP 1
 #define TEM_SET_NPROC _IOW(MYIOC_TYPE, SET_NPROC_OP, int)
 
@@ -693,17 +623,17 @@ int gpio_dummy_init(void)
     dummy_irq = ret;
     printk(KERN_WARNING "Successfully requested IRQ# %d for %s\n", dummy_irq, gpio_dummy[ARRAY_SIZE(gpio_dummy)-1].label);
     
-	ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
+    ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
     
     if(ret) {
         printk(KERN_ERR "Unable to request IRQ for dummy device: %d\n", ret);
         goto fail1;
     }
     write_to_gpio(15);
-	
-	bf = circular_buffer_new();
     
-	return 0;
+    bf = circular_buffer_new();
+    
+    return 0;
     
 fail1:
     gpio_free_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
@@ -717,23 +647,6 @@ void gpio_dummy_exit(void)
     free_irq(dummy_irq, NULL);
     gpio_free_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
     iounmap((void *)gpio_dummy_base);
-}
-u8 msbit=0;
-int odd=1;
-irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
-	u8 half=read_half_byte();
-	if(odd){
-		msbit=half;
-	}else{
-		char ascii=(char)msbit<<4|half;
-		printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
-		circular_buffer_write(ascii);
-		printk(KERN_WARNING "===After writing, the content of circular_buffer is:===\n");
-		circular_buffer_print();
-		printk(KERN_WARNING "===End of printing the content of circular_buffer.\n\n");
-	}
-	odd=!odd;
-	return IRQ_HANDLED;
 }
 
 /**
@@ -749,7 +662,7 @@ int __init asgn2_init_module(void){
             printk(KERN_WARNING "Can't use the major number %d; try atomatic allocation...\n", asgn2_major);
             rv = alloc_chrdev_region(&devno, 0, 1, MYDEV_NAME);
             asgn2_major = MAJOR(devno);
-            }
+        }
     } else {
         rv = alloc_chrdev_region(&devno, 0, 1, MYDEV_NAME);
         asgn2_major = MAJOR(devno);
@@ -795,13 +708,13 @@ int __init asgn2_init_module(void){
     
     /*create proc entry*/
     proc = proc_create_data(MYDEV_NAME, 0, NULL, &asgn2_proc_ops, NULL);
-
-	/*initialize GPIO device*/
-	printk(KERN_WARNING "creating GPIO device\n");
+    
+    /*initialize GPIO device*/
+    printk(KERN_WARNING "creating GPIO device\n");
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
     
-	return gpio_dummy_init();
+    return gpio_dummy_init();
 }
 
 
@@ -820,7 +733,7 @@ void __exit asgn2_exit_module(void){
     unregister_chrdev_region(MKDEV(asgn2_major, 0), 1);
     printk(KERN_WARNING "===release GPIO device\n");
     gpio_dummy_exit();
-	circular_buffer_free(bf);
+    circular_buffer_free(bf);
     printk(KERN_WARNING "===GOOD BYE from %s===\n", MYDEV_NAME);
     
 }
@@ -831,4 +744,3 @@ void __exit asgn2_exit_module(void){
 
 module_init(asgn2_init_module);
 module_exit(asgn2_exit_module);
-
