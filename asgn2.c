@@ -158,12 +158,26 @@ buffer bf;
 
 
 /*===PAGE POOL===*/
+typedef struct my_page_list *my_page_list;
+typedef struct my_page_node *my_page_node;
+
 typedef struct q_item *q_item;
 typedef struct queue *queue;
 
+struct my_page_node {
+    struct page *page;
+    my_page_node next;
+};
+
+struct my_page_list {
+    my_page_node first;
+    my_page_node last;
+    int num_pages;
+};
+
 struct q_item {
     struct list_head mem_list;
-    int num_pages;        /* number of memory pages this item currently holds */
+    int num_items;        /* number of memory pages this item currently holds */
     size_t data_size;
     q_item next;
 };
@@ -188,15 +202,16 @@ queue queue_new(void) {
 void enqueue(queue q) {
     if (q->length == 0) {
         q->first = kmalloc(sizeof(struct q_item), GFP_KERNEL);
+        INIT_LIST_HEAD(&(q->first->mem_list));
         q->first->next = NULL;
         q->last = q->first;
     } else {
         q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
         q->last = q->last->next;
+        INIT_LIST_HEAD(&(q->last->mem_list));
         q->last->next = NULL;
     }
     
-    INIT_LIST_HEAD(&q->last->mem_list);
     q->first->num_pages = 0;
     q->first->data_size = 0;
     q->length += 1;
@@ -233,6 +248,12 @@ void queue_print(queue q) {
         printk(KERN_WARNING "\n");
         each = each->next;
         i += 1;
+        
+        if (i > 10) {
+            printk(KERN_WARNING "\n");
+            printk(KERN_WARNING "===Something goes wrong===\n");
+            printk(KERN_WARNING "\n");
+        }
     }
     printk(KERN_WARNING "end of summary of current queue\n");
     printk(KERN_WARNING "\n");
@@ -241,31 +262,6 @@ void queue_print(queue q) {
 int queue_size(queue q) {
     return q->length;
 }
-
-
-//struct q_item {
-//    struct list_head mem_list;
-//    int num_pages;        /* number of memory pages this item currently holds */
-//    size_t data_size;
-//    q_item next;
-//};
-
-//void add_pages(int num) {
-//    int i;
-//
-//    for (i = 0; i < num; i++) {
-//        page_node *pg;
-//        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
-//        pg->page = alloc_page(GFP_KERNEL);
-//        INIT_LIST_HEAD(&pg->list);
-//        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
-//        list_add_tail(&pg->list, &asgn2_device.mem_list);
-//        asgn2_device.num_pages += 1;
-//        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
-//    }
-//
-//}
-
 
 
 void queue_read(queue q, char c) {
@@ -289,29 +285,13 @@ void queue_read(queue q, char c) {
     
     offset = curr->data_size % PAGE_SIZE;
     //list_for_each_entry_reverse(pos, head, member)
+    
     list_for_each_entry_reverse(pg, &curr->mem_list, list) {
         a = (char *)(page_address(pg->page) + offset);
         *a = c;
         curr->data_size += 1;
         break;
     }
-    //
-    //    /*helper function write one byte*/
-    //    void circular_buffer_write(char data) {
-    //        char *a;
-    //        if((bf->head+1) % PAGE_SIZE == bf->tail) {
-    //            printk(KERN_WARNING "circular buffer is full, just return\n");
-    //            return;
-    //        }
-    //
-    //
-    //        a=(char*)(page_address(bf->page)+bf->head);
-    //
-    //        *a = data;
-    //
-    //        bf->head += 1;
-    //        bf->head = bf->head%PAGE_SIZE;
-    //    }
     
 }
 
