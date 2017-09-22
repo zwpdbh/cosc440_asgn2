@@ -204,12 +204,11 @@ struct queue {
 };
 
 queue q;
-/* available_file_size records the size of current avaiable data
- * if q->length > 0, then available_file_size = the first stored file size
- * otherwise, it is the currently written size by some big file
+
+/* in the case of the current reading is on a bif file which has not been finished writing:
+ * just process available_size.
  */
-unsigned long available_file_size = 0;
-unsigned long curr_consume_size = 0;
+unsigned long avaiable_data = 0;
 
 queue queue_new(void) {
     queue q = kmalloc(sizeof(*q), GFP_KERNEL);
@@ -359,23 +358,23 @@ void my_tasklet_handler(unsigned long tasklet_data) {
         c =  circular_buffer_read();
         
         if (c) {
-            if (available_file_size == 0) {
+            if (avaiable_data == 0) {
                 add_pages(1);
             }
             // at bottom half, read data from circular buffer into page pool
-            offset = available_file_size % PAGE_SIZE;
+            offset = avaiable_data % PAGE_SIZE;
             
             list_for_each_entry_reverse(pnode, &asgn2_device.mem_list , list) {
                 a = (char *) (page_address(pnode->page) + offset);
                 *a = c;
-                available_file_size += 1;
+                avaiable_data += 1;
                 break;
             }
         } else {
-            enqueue(q, available_file_size);
-            asgn2_device.data_size += available_file_size;
+            enqueue(q, avaiable_data);
+            asgn2_device.data_size += avaiable_data;
             
-            available_file_size = 0;
+            avaiable_data = 0;
         }
     }
 }
@@ -530,7 +529,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     printk(KERN_WARNING "count = %ld", (long int)count);
     printk(KERN_WARNING "*f_pos = %ld\n", (long) *f_pos);
     
-    /*if there is stored file_size avaiable, and *f_pos == 0 means it is in the first round of read*/
+    /* this is the case when these is an available file, so just retriev it as usual plus release the associated page*/
     if (*f_pos == 0 && q->length > 0) {
         file_size = dequeue(q);
         
@@ -543,7 +542,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         } else {
             need_free_pages = file_size / PAGE_SIZE;
         }
-        
         
         page_index = *f_pos / PAGE_SIZE;
         offset = *f_pos % PAGE_SIZE;
@@ -562,8 +560,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             ptr = ptr->next;
             curr_page_index += 1;
         }
-        
-        printk(KERN_WARNING "unfinished = %d\n", unfinished);
         
         do {
             page_index = *f_pos / PAGE_SIZE;
@@ -608,8 +604,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         printk(KERN_WARNING "\n\n\n");
         return total_finished;
         
-    } else if (*f_pos == 0 && available_file_size > PAGE_SIZE) {
-        /* if there is not a available file and the accumulative available_file_size is enough for one page */
+    } else if (*f_pos == 0 && avaiable_data > PAGE_SIZE) {
+        /* if there is not a available file and the accumulative avaiable_data is enough for one page */
         printk(KERN_WARNING "this should not be used.\n");
         printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
         printk(KERN_WARNING "\n\n\n");
@@ -621,100 +617,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         printk(KERN_WARNING "\n\n\n");
         return 0;
     }
-    
-    //    /* file_size represent the current processing data size */
-    //    if (unfinished > 0) {
-    //
-    //        if (unfinished % PAGE_SIZE != 0) {
-    //            need_free_pages = unfinished / PAGE_SIZE + 1;
-    //        } else {
-    //            need_free_pages = unfinished / PAGE_SIZE;
-    //        }
-    //
-    //        /*if the seeking position is bigger than the data_size, return 0*/
-    //        if (*f_pos >= unfinished) {
-    //            printk(KERN_WARNING "because *f_pos(%ld) >= file_size(%ld), return 0", (long) *f_pos, file_size);
-    //            return 0;
-    //        }
-    //
-    //        page_index = *f_pos / PAGE_SIZE;
-    //        offset = *f_pos % PAGE_SIZE;
-    //        curr_page_index = 0;
-    //
-    //        /*check the limit of amount of work needed to be done*/
-    //        if (*f_pos + count > unfinished) {
-    //            unfinished = file_size - *f_pos;
-    //        } else {
-    //            unfinished = count;
-    //        }
-    //
-    //        ptr = asgn2_device.mem_list.next;
-    //        /*make sure the current operating page is the page computed from *f_pos / PAGE_SIZE*/
-    //        while (curr_page_index < page_index) {
-    //            ptr = ptr->next;
-    //            curr_page_index += 1;
-    //        }
-    //
-    //
-    //        printk(KERN_WARNING "unfinished = %d\n", unfinished);
-    //
-    //        do {
-    //            page_index = *f_pos / PAGE_SIZE;
-    //            offset = *f_pos % PAGE_SIZE;
-    //
-    ////            printk(KERN_WARNING "curr_page_index = %d\n", curr_page_index);
-    ////            printk(KERN_WARNING "page_index = %d\n", page_index);
-    ////            printk(KERN_WARNING "offset = %d\n", offset);
-    //
-    //            if (page_index != curr_page_index) {
-    //                printk(KERN_WARNING "curr_page_index = %d, *f_pos / PAGE_SIZE = page_index = %d", curr_page_index, page_index);
-    //                ptr = ptr->next;
-    //                curr_page_index += 1;
-    //                printk(KERN_WARNING "go to next page: %d\n", curr_page_index);
-    //            }
-    //
-    //            page_ptr = list_entry(ptr, page_node, list);
-    //            if (unfinished > PAGE_SIZE - offset) {
-    //                printk(KERN_WARNING "processing %ld amout of data(PAGE_SIZE - offset)\n", (long)(PAGE_SIZE - offset));
-    //                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
-    //                finished = PAGE_SIZE - offset -result;
-    //            } else {
-    //                printk(KERN_WARNING "processing %ld amout of data(unfinished)\n", (long int)unfinished);
-    //                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
-    //                finished = unfinished - result;
-    //            }
-    //
-    //            if (result < 0) {
-    //                break;
-    //            }
-    //
-    //            processing_count += 1;
-    //            unfinished -= finished;
-    //            total_finished += finished;
-    //            *f_pos += finished;
-    //
-    //            printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
-    //            printk(KERN_WARNING "finished = %d\n", finished);
-    //            printk(KERN_WARNING "unfinished = %d\n", unfinished);
-    //            printk(KERN_WARNING "total_finished = %d\n", total_finished);
-    //            printk(KERN_WARNING "\n");
-    //
-    //        } while (unfinished >0);
-    //
-    //        printk(KERN_WARNING "free %d number of pages and %ld size of data\n", need_free_pages, (long int)total_finished);
-    //        free_memory_pages(&asgn2_device, need_free_pages, total_finished);
-    //        file_size -= total_finished;
-    //        available_file_size -= total_finished;
-    //        queue_print(q);
-    //        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-    //        printk(KERN_WARNING "\n\n\n");
-    //        return total_finished;
-    //    }
-    //
-    //    printk(KERN_WARNING "because file_size = %ld <=0, end reading\n", file_size);
-    //    printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-    //    printk(KERN_WARNING "\n\n\n");
-    
 }
 
 
