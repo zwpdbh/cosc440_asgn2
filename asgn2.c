@@ -156,6 +156,201 @@ struct circular_buffer {
 
 buffer bf;
 
+
+/*===PAGE POOL===*/
+typedef struct q_item *q_item;
+typedef struct queue *queue;
+
+struct q_item {
+    struct list_head mem_list;
+    int num_pages;        /* number of memory pages this item currently holds */
+    size_t data_size;
+    q_item next;
+};
+
+struct queue {
+    q_item first;
+    q_item last;
+    int length;
+};
+
+queue q;
+bool end_of_file = true;
+
+queue queue_new(void) {
+    queue q = kmalloc(sizeof(*q), GFP_KERNEL);
+    q->first = NULL;
+    q->last = NULL;
+    q->length = 0;
+    return q;
+}
+
+void enqueue(queue q) {
+    if (q->length == 0) {
+        q->first = kmalloc(sizeof(struct q_item), GFP_KERNEL);
+        q->first->next = NULL;
+        q->last = q->first;
+    } else {
+        q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
+        q->last = q->last->next;
+        q->last->next = NULL;
+    }
+    
+    INIT_LIST_HEAD(&q->last->mem_list);
+    q->first->num_pages = 0;
+    q->first->data_size = 0;
+    q->length += 1;
+}
+
+struct list_head dequeue(queue q) {
+    struct list_head dequeued_list_head;
+    q_item tmp;
+    
+    if (q->length > 0) {
+        dequeued_list_head = q->first->mem_list;
+        tmp = q->first;
+        q->first = q->first->next;
+        
+        // do I need to free list_head?
+        //        free(&q->first->mem_list);
+        kfree(tmp);
+        q->length -= 1;
+    }
+    
+    return dequeued_list_head;
+}
+
+void queue_print(queue q) {
+    int i;
+    q_item each;
+    
+    i = 0;
+    each = q->first;
+    
+    printk(KERN_WARNING "summary of current queue:\n");
+    while (each != NULL) {
+        printk(KERN_WARNING "queue[%d], => %d page, %d data_size\n", i, each->num_pages, each->data_size);
+        printk(KERN_WARNING "\n");
+        each = each->next;
+        i += 1;
+    }
+    printk(KERN_WARNING "end of summary of current queue\n");
+    printk(KERN_WARNING "\n");
+}
+
+int queue_size(queue q) {
+    return q->length;
+}
+
+
+//struct q_item {
+//    struct list_head mem_list;
+//    int num_pages;        /* number of memory pages this item currently holds */
+//    size_t data_size;
+//    q_item next;
+//};
+
+//void add_pages(int num) {
+//    int i;
+//
+//    for (i = 0; i < num; i++) {
+//        page_node *pg;
+//        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
+//        pg->page = alloc_page(GFP_KERNEL);
+//        INIT_LIST_HEAD(&pg->list);
+//        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
+//        list_add_tail(&pg->list, &asgn2_device.mem_list);
+//        asgn2_device.num_pages += 1;
+//        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
+//    }
+//
+//}
+
+
+
+void queue_read(queue q, char c) {
+    struct q_item *curr;
+    page_node *pg;
+    
+    char *a;
+    int offset;
+    
+    curr = q->first;
+    
+    if (curr->num_pages == 0 || curr->data_size % PAGE_SIZE == 0) {
+        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
+        pg->page = alloc_page(GFP_KERNEL);
+        INIT_LIST_HEAD(&pg->list);
+        printk(KERN_WARNING "before adding new page, num_pages = %d\n", curr->num_pages);
+        list_add_tail(&pg->list, &curr->mem_list);
+        curr->num_pages += 1;
+        printk(KERN_WARNING "after adding new page, num_pages = %d\n", curr->num_pages);
+    }
+    
+    offset = curr->data_size % PAGE_SIZE;
+    //list_for_each_entry_reverse(pos, head, member)
+    list_for_each_entry_reverse(pg, &curr->mem_list, list) {
+        a = (char *)(page_address(pg->page) + offset);
+        *a = c;
+        curr->data_size += 1;
+        break;
+    }
+    //
+    //    /*helper function write one byte*/
+    //    void circular_buffer_write(char data) {
+    //        char *a;
+    //        if((bf->head+1) % PAGE_SIZE == bf->tail) {
+    //            printk(KERN_WARNING "circular buffer is full, just return\n");
+    //            return;
+    //        }
+    //
+    //
+    //        a=(char*)(page_address(bf->page)+bf->head);
+    //
+    //        *a = data;
+    //
+    //        bf->head += 1;
+    //        bf->head = bf->head%PAGE_SIZE;
+    //    }
+    
+}
+
+
+/*free all in queue*/
+void queue_free(queue q) {
+    q_item each;
+    struct page_node_rec *pnode, *pnode_next;
+    int count;
+    int index;
+    
+    index = 0;
+    printk(KERN_WARNING "===free all q_items in queues===\n");
+    while (q->first != NULL) {
+        each = q->first;
+        q->first = q->first->next;
+        // free each mem_list
+        printk(KERN_WARNING "=free %dth q_item in queue=\n", index);
+        count = 0;
+        if (!list_empty(&each->mem_list)) {
+            list_for_each_entry_safe(pnode, pnode_next, &each->mem_list, list) {
+                __free_page(pnode->page);
+                list_del(&pnode->list);
+                kfree(pnode);
+                printk(KERN_WARNING "freed %d: page\n", count);
+                count += 1;
+            }
+        }
+        kfree(each);
+        
+        printk(KERN_WARNING "=end of free %dth q_item in queue=\n", index);
+        index += 1;
+    }
+    kfree(q);
+    printk(KERN_WARNING "===end of free all q_items in queue===\n");
+}
+
+/*======*/
+
 /*helper function on my buffer*/
 buffer circular_buffer_new(void) {
     buffer bf;
@@ -174,7 +369,7 @@ void circular_buffer_write(char data) {
         printk(KERN_WARNING "circular buffer is full, just return\n");
         return;
     }
-
+    
     
     a=(char*)(page_address(bf->page)+bf->head);
     
@@ -187,7 +382,7 @@ void circular_buffer_write(char data) {
 /*helper function read one byte*/
 char circular_buffer_read(void){
     char *c;
-
+    
     c = (char *)(page_address(bf->page)+bf->tail);
     bf->tail += 1;
     bf->tail = bf->tail % PAGE_SIZE;
@@ -218,24 +413,34 @@ void circular_buffer_print(void) {
 
 /*define my tasklet and tasklet handler*/
 void my_tasklet_handler(unsigned long tasklet_data) {
-
+    
     char c;
     printk(KERN_WARNING "\n");
     printk(KERN_WARNING "=executing tasklet handler...=\n");
     printk(KERN_WARNING "bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
     if(bf->tail == bf->head) {
-        printk(KERN_WARNING "becuase bf->tail == bf->head, just return, no schedule tasklet\n");
+        printk(KERN_WARNING "becuase bf->tail == bf->head, circular buffer is empty, just return, no schedule tasklet\n");
         return;
     } else {
         c =  circular_buffer_read();
-        printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
-        printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
-        printk(KERN_WARNING "at bottom half, read data from circular buffer into page pool\n");
         
-        printk(KERN_WARNING "=next, read data from page pool=\n");
-        printk(KERN_WARNING "\n");
+        if (c) {
+            printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
+            printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
+            // at bottom half, read data from circular buffer into page pool
+            
+            queue_read(q, c);
+            
+            printk(KERN_WARNING "=next, read data from page pool=\n");
+            printk(KERN_WARNING "\n");
+        } else {
+            printk(KERN_WARNING "\n meet the end of file\n");
+            printk(KERN_WARNING "need to create a new mem_list in queue\n");
+            enqueue(q);
+            printk(KERN_WARNING "after enqueue, the length of the queue is %d\n\n", q->length);
+            queue_print(q);
+        }
     }
-
 }
 
 DECLARE_TASKLET(my_tasklet, my_tasklet_handler, 0);
@@ -632,6 +837,7 @@ int gpio_dummy_init(void)
     write_to_gpio(15);
     
     bf = circular_buffer_new();
+    q = queue_new();
     
     return 0;
     
@@ -734,6 +940,7 @@ void __exit asgn2_exit_module(void){
     printk(KERN_WARNING "===release GPIO device\n");
     gpio_dummy_exit();
     circular_buffer_free(bf);
+    queue_free(q);
     printk(KERN_WARNING "===GOOD BYE from %s===\n", MYDEV_NAME);
     
 }
