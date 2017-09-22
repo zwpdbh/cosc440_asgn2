@@ -245,8 +245,10 @@ long dequeue(queue q) {
         kfree(tmp);
         q->length -= 1;
         return size;
+    } else if (current_processing_file_size >= PAGE_SIZE){
+        return PAGE_SIZE;
     } else {
-        return -1;
+        return 0;
     }
     
 }
@@ -345,18 +347,18 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     char *a;
     page_node *pnode;
     
-    printk(KERN_WARNING "\n");
-    printk(KERN_WARNING "=executing tasklet handler...=\n");
-    printk(KERN_WARNING "bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
+    //    printk(KERN_WARNING "\n");
+    //    printk(KERN_WARNING "=executing tasklet handler...=\n");
+    //    printk(KERN_WARNING "bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
     if(bf->tail == bf->head) {
-        printk(KERN_WARNING "becuase bf->tail == bf->head, circular buffer is empty, just return, no schedule tasklet\n");
+        //        printk(KERN_WARNING "becuase bf->tail == bf->head, circular buffer is empty, just return, no schedule tasklet\n");
         return;
     } else {
         c =  circular_buffer_read();
         
         if (c) {
-            printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
-            printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
+            //            printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
+            //            printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
             
             // at bottom half, read data from circular buffer into page pool
             offset = current_processing_file_size % PAGE_SIZE;
@@ -368,17 +370,17 @@ void my_tasklet_handler(unsigned long tasklet_data) {
                 break;
             }
             
-            printk(KERN_WARNING "=next, read data from page pool=\n");
-            printk(KERN_WARNING "\n");
+            //            printk(KERN_WARNING "=next, read data from page pool=\n");
+            //            printk(KERN_WARNING "\n");
         } else {
-            printk(KERN_WARNING "\n meet the end of file\n");
-            printk(KERN_WARNING "record down the current file size: %ld\n", current_processing_file_size);
+            //            printk(KERN_WARNING "\n meet the end of file\n");
+            //            printk(KERN_WARNING "record down the current file size: %ld\n", current_processing_file_size);
             enqueue(q, current_processing_file_size);
             asgn2_device.data_size += current_processing_file_size;
             
             current_processing_file_size = 0;
             add_pages(1);
-            printk(KERN_WARNING "after enqueue, the length of the queue is %d\n\n", q->length);
+            //            printk(KERN_WARNING "after enqueue, the length of the queue is %d\n\n", q->length);
             queue_print(q);
         }
     }
@@ -396,7 +398,7 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
         msbit=half;
     }else{
         char ascii=(char)msbit<<4|half;
-        printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
+        //        printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
         circular_buffer_write(ascii);
         
         tasklet_schedule(&my_tasklet);
@@ -528,6 +530,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     
     if (*f_pos == 0) {
         file_size = dequeue(q);
+        /*what if there is some data in my pool but because it is so big, it haven't been finished writing. so the dequeue result will be -1*/
     }
     
     printk(KERN_WARNING "from dequeue, file_size need to read is: %ld, %d files left\n", file_size, q->length);
@@ -610,16 +613,16 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             printk(KERN_WARNING "\n");
         } while (unfinished >0);
         
-        printk(KERN_WARNING "free the associated page and reduce data size");
+        printk(KERN_WARNING "free %d num_pages, %ld siz of data\n", need_free_pages, (long int)total_finished);
         free_memory_pages(&asgn2_device, need_free_pages, total_finished);
+        current_processing_file_size -= total_finished;
         
         printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
         printk(KERN_WARNING "\n\n\n");
         return total_finished;
-    } else {
-        // need wait untail there are data in page_pool
-        return 0;
     }
+    
+    return total_finished;
 }
 
 
@@ -874,7 +877,8 @@ void __exit asgn2_exit_module(void){
 }
 
 
+
+
+
 module_init(asgn2_init_module);
 module_exit(asgn2_exit_module);
-
-
