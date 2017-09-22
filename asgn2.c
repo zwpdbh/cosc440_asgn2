@@ -149,6 +149,8 @@ typedef struct asgn2_dev_t {
     struct kmem_cache *cache;      /* cache memory */
     struct class *class;     /* the udev class */
     struct device *device;   /* the udev device node */
+    unsigned long head;
+    unsigned long tail;
 } asgn2_dev;
 
 asgn2_dev asgn2_device;
@@ -169,14 +171,13 @@ void add_pages(int num) {
         pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
         pg->page = alloc_page(GFP_KERNEL);
         INIT_LIST_HEAD(&pg->list);
-        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
         list_add_tail(&pg->list, &asgn2_device.mem_list);
         asgn2_device.num_pages += 1;
-        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
     }
     
 }
 
+/*===============================================*/
 
 /*define my circular buffer*/
 typedef struct circular_buffer *buffer;
@@ -187,102 +188,6 @@ struct circular_buffer {
 };
 
 buffer bf;
-
-/*===PAGE POOL INFO===*/
-typedef struct q_item *q_item;
-typedef struct queue *queue;
-
-struct q_item {
-    long size;
-    q_item next;
-};
-
-struct queue {
-    q_item first;
-    q_item last;
-    int length;
-};
-
-queue q;
-
-/* in the case of the current reading is on a bif file which has not been finished writing:
- * just process available_size.
- */
-unsigned long avaiable_data = 0;
-
-queue queue_new(void) {
-    queue q = kmalloc(sizeof(*q), GFP_KERNEL);
-    q->first = NULL;
-    q->last = NULL;
-    q->length = 0;
-    
-    return q;
-}
-
-void enqueue(queue q, long size) {
-    if (q->length == 0) {
-        q->first = kmalloc(sizeof(struct q_item), GFP_KERNEL);
-        q->first->size = size;
-        q->first->next = NULL;
-        q->last = q->first;
-    } else {
-        q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
-        q->last = q->last->next;
-        q->last->size = size;
-        q->last->next = NULL;
-    }
-    
-    q->length += 1;
-}
-
-/*dequeue one file record if there is one*/
-long dequeue(queue q) {
-    long size;
-    
-    q_item tmp;
-    
-    printk(KERN_WARNING "=dequeue=");
-    if (q->length > 0) {
-        printk(KERN_WARNING "because q->length = %d > 0 \n", q->length);
-        size = q->first->size;
-        tmp = q->first;
-        q->first = q->first->next;
-        kfree(tmp);
-        q->length -= 1;
-        printk(KERN_WARNING "return size = %ld \n", size);
-        return size;
-    } else {
-        return -1;
-    }
-    
-}
-
-void queue_print(queue q) {
-    int i;
-    q_item each;
-    
-    i = 0;
-    each = q->first;
-    
-    while (each != NULL) {
-        printk(KERN_WARNING "%dth q_item, size = %ld", i, each->size);
-        each = each->next;
-        i += 1;
-    }
-    printk(KERN_WARNING "\n");
-}
-
-void queue_free(queue q) {
-    q_item each;
-    while (q->first != NULL) {
-        each = q->first;
-        q->first = q->first->next;
-        kfree(each);
-    }
-    kfree(q);
-}
-
-/*===============================================*/
 
 /*helper function on my buffer*/
 buffer circular_buffer_new(void) {
@@ -344,38 +249,52 @@ void circular_buffer_print(void) {
     }
 }
 
-/*define my tasklet and tasklet handler*/
+
+/* bottom half: tasklet handler need to
+ * read data from circular buff
+ * and write it into the circular page pool
+ */
 void my_tasklet_handler(unsigned long tasklet_data) {
-    int offset;
     char c;
     char *a;
-    page_node *pnode;
+    int page_index;
+    int offset;
+    int write_pos;
+    int index;
+    
+    page_node *p;
     
     if(bf->tail == bf->head) {
-        /*becuase bf->tail == bf->head, circular buffer is empty, just return, no schedule tasklet*/
+        /* becuase bf->tail == bf->head, circular buffer is empty, just return,
+         * no schedule tasklet
+         */
         return;
-    } else {
-        c =  circular_buffer_read();
-        
-        if (c) {
-            if (avaiable_data == 0) {
-                add_pages(1);
-            }
-            // at bottom half, read data from circular buffer into page pool
-            offset = avaiable_data % PAGE_SIZE;
+    }
+    
+    c =  circular_buffer_read();
+    write_pos = asgn2_device.head + 1;
+    /* write c into circular page */
+    if ((write_pos) % (PAGE_SIZE * asgn2_device.num_pages) == asgn2_device.tail) {
+        printk(KERN_WARNING "page pool is full\n");
+        return;
+    }
+    
+    page_index = write_pos / PAGE_SIZE;
+    offset = write_pos % PAGE_SIZE;
+    
+    /*loop to that position*/
+    index = 0;
+    list_for_each_entry(p, &asgn2_device.mem_list, list) {
+        if (index == page_index) {
+            a = (char *)(page_address(p->page) + offset);
+            *a = c;
             
-            list_for_each_entry_reverse(pnode, &asgn2_device.mem_list , list) {
-                a = (char *) (page_address(pnode->page) + offset);
-                *a = c;
-                avaiable_data += 1;
-                break;
-            }
-        } else {
-            enqueue(q, avaiable_data);
-            asgn2_device.data_size += avaiable_data;
-            
-            avaiable_data = 0;
+            asgn2_device.head += 1;
+            asgn2_device.data_size += 1;
+            asgn2_device.head = asgn2_device.head % PAGE_SIZE;
+            break;
         }
+        index += 1;
     }
 }
 
@@ -391,9 +310,7 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
         msbit=half;
     }else{
         char ascii=(char)msbit<<4|half;
-        //        printk(KERN_WARNING "try to write char: %c into circular_buffer\n",ascii);
         circular_buffer_write(ascii);
-        
         tasklet_schedule(&my_tasklet);
     }
     odd=!odd;
@@ -516,7 +433,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct page_node_rec *page_ptr;
     int processing_count;
     
-    int need_free_pages;
     
     //dev = filp->private_data;
     total_finished = 0;
@@ -529,94 +445,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     printk(KERN_WARNING "count = %ld", (long int)count);
     printk(KERN_WARNING "*f_pos = %ld\n", (long) *f_pos);
     
-    /* this is the case when these is an available file, so just retriev it as usual plus release the associated page*/
-    if (*f_pos == 0 && q->length > 0) {
-        file_size = dequeue(q);
-        
-        if (*f_pos > file_size) {
-            return 0;
-        }
-        
-        if (file_size % PAGE_SIZE != 0) {
-            need_free_pages = file_size / PAGE_SIZE + 1;
-        } else {
-            need_free_pages = file_size / PAGE_SIZE;
-        }
-        
-        page_index = *f_pos / PAGE_SIZE;
-        offset = *f_pos % PAGE_SIZE;
-        curr_page_index = 0;
-        
-        /*check the limit of amount of work needed to be done*/
-        if (*f_pos + count > file_size) {
-            unfinished = file_size - *f_pos;
-        } else {
-            unfinished = count;
-        }
-        
-        ptr = asgn2_device.mem_list.next;
-        /*make sure the current operating page is the page computed from *f_pos / PAGE_SIZE*/
-        while (curr_page_index < page_index) {
-            ptr = ptr->next;
-            curr_page_index += 1;
-        }
-        
-        do {
-            page_index = *f_pos / PAGE_SIZE;
-            offset = *f_pos % PAGE_SIZE;
-            
-            
-            if (page_index != curr_page_index) {
-                ptr = ptr->next;
-                curr_page_index += 1;
-                
-            }
-            
-            page_ptr = list_entry(ptr, page_node, list);
-            if (unfinished > PAGE_SIZE - offset) {
-                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
-                finished = PAGE_SIZE - offset -result;
-            } else {
-                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
-                finished = unfinished - result;
-            }
-            
-            if (result < 0) {
-                break;
-            }
-            
-            processing_count += 1;
-            unfinished -= finished;
-            total_finished += finished;
-            *f_pos += finished;
-            
-            printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
-            printk(KERN_WARNING "finished = %d\n", finished);
-            printk(KERN_WARNING "unfinished = %d\n", unfinished);
-            printk(KERN_WARNING "total_finished = %d\n", total_finished);
-            printk(KERN_WARNING "\n");
-        } while (unfinished >0);
-        
-        printk(KERN_WARNING "free the associated page and reduce data size");
-        free_memory_pages(&asgn2_device, need_free_pages, total_finished);
-        
-        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-        printk(KERN_WARNING "\n\n\n");
-        return total_finished;
-        
-    } else if (*f_pos == 0 && avaiable_data > PAGE_SIZE) {
-        /* if there is not a available file and the accumulative avaiable_data is enough for one page */
-        printk(KERN_WARNING "this should not be used.\n");
-        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-        printk(KERN_WARNING "\n\n\n");
-        return 0;
-    } else {
-        /**/
-        printk(KERN_WARNING "need wait untail there is avaiable data\n");
-        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-        printk(KERN_WARNING "\n\n\n");
-        return 0;
-    }
+    return 0;
 }
 
 
@@ -699,11 +528,12 @@ int my_seq_show(struct seq_file *s, void *v) {
     /**
      * use seq_printf to print some info to s
      */
-    
     seq_printf(s, "dev->nprocs = %d\n", atomic_read(&asgn2_device.nprocs));
     seq_printf(s, "dev->max_nprocs = %d\n", atomic_read(&asgn2_device.max_nprocs));
     seq_printf(s, "dev->num_pages = %d\n", asgn2_device.num_pages);
     seq_printf(s, "dev->data_size = %d\n", asgn2_device.data_size);
+    seq_printf(s, "dev->head = %lu\n", asgn2_device.head);
+    seq_printf(s, "dev->tail = %lu\n", asgn2_device.tail);
     
     return 0;
 }
@@ -762,7 +592,6 @@ int gpio_dummy_init(void)
     write_to_gpio(15);
     
     bf = circular_buffer_new();
-    q = queue_new();
     
     return 0;
     
@@ -842,6 +671,8 @@ int __init asgn2_init_module(void){
     
     /*initialize GPIO device*/
     printk(KERN_WARNING "creating GPIO device\n");
+    printk(KERN_WARNING "initializing 10 pages\n");
+    add_pages(10);
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
     
@@ -865,7 +696,6 @@ void __exit asgn2_exit_module(void){
     printk(KERN_WARNING "===release GPIO device\n");
     gpio_dummy_exit();
     circular_buffer_free(bf);
-    queue_free(q);
     printk(KERN_WARNING "===GOOD BYE from %s===\n", MYDEV_NAME);
     
 }
