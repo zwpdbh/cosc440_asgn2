@@ -138,13 +138,45 @@ static void write_to_gpio(char c) {
 
 /*=== end Defination for GPIO ===*/
 
-/**
- * The node structure for the memory page linked list.
- */
+typedef struct asgn2_dev_t {
+    dev_t dev;            /* the device */
+    struct cdev *cdev;
+    struct list_head mem_list;
+    int num_pages;        /* number of memory pages this module currently holds */
+    size_t data_size;     /* total data size in this module */
+    atomic_t nprocs;      /* number of processes accessing this device */
+    atomic_t max_nprocs;  /* max number of processes accessing this device */
+    struct kmem_cache *cache;      /* cache memory */
+    struct class *class;     /* the udev class */
+    struct device *device;   /* the udev device node */
+} asgn2_dev;
+
+asgn2_dev asgn2_device;
+
 typedef struct page_node_rec {
     struct list_head list;
     struct page *page;
 } page_node;
+
+/**
+ * Helper function which add a page and set the data_size
+ */
+void add_pages(int num) {
+    int i;
+    
+    for (i = 0; i < num; i++) {
+        page_node *pg;
+        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
+        pg->page = alloc_page(GFP_KERNEL);
+        INIT_LIST_HEAD(&pg->list);
+        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
+        list_add_tail(&pg->list, &asgn2_device.mem_list);
+        asgn2_device.num_pages += 1;
+        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
+    }
+    
+}
+
 
 /*define my circular buffer*/
 typedef struct circular_buffer *buffer;
@@ -156,29 +188,12 @@ struct circular_buffer {
 
 buffer bf;
 
-
-/*===PAGE POOL===*/
-typedef struct my_page_list *my_page_list;
-typedef struct my_page_node *my_page_node;
-
+/*===PAGE POOL INFO===*/
 typedef struct q_item *q_item;
 typedef struct queue *queue;
 
-struct my_page_node {
-    struct page *page;
-    my_page_node next;
-};
-
-struct my_page_list {
-    my_page_node first;
-    my_page_node last;
-    int num_pages;
-};
-
 struct q_item {
-    struct list_head mem_list;
-    int num_items;        /* number of memory pages this item currently holds */
-    size_t data_size;
+    long size;
     q_item next;
 };
 
@@ -189,50 +204,51 @@ struct queue {
 };
 
 queue q;
-bool end_of_file = true;
+long current_processing_file_size = 0;
+long file_size = 0;
 
 queue queue_new(void) {
     queue q = kmalloc(sizeof(*q), GFP_KERNEL);
     q->first = NULL;
     q->last = NULL;
     q->length = 0;
+    
+    add_pages(1);
+    
     return q;
 }
 
-void enqueue(queue q) {
+void enqueue(queue q, long size) {
     if (q->length == 0) {
         q->first = kmalloc(sizeof(struct q_item), GFP_KERNEL);
-        INIT_LIST_HEAD(&(q->first->mem_list));
+        q->first->size = size;
         q->first->next = NULL;
         q->last = q->first;
     } else {
         q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
         q->last = q->last->next;
-        INIT_LIST_HEAD(&(q->last->mem_list));
+        q->last->size = size;
         q->last->next = NULL;
     }
     
-    q->first->num_pages = 0;
-    q->first->data_size = 0;
     q->length += 1;
 }
 
-struct list_head dequeue(queue q) {
-    struct list_head dequeued_list_head;
-    q_item tmp;
+long dequeue(queue q) {
+    long size;
     
+    q_item tmp;
     if (q->length > 0) {
-        dequeued_list_head = q->first->mem_list;
+        size = q->first->size;
         tmp = q->first;
         q->first = q->first->next;
-        
-        // do I need to free list_head?
-        //        free(&q->first->mem_list);
         kfree(tmp);
         q->length -= 1;
+        return size;
+    } else {
+        return -1;
     }
     
-    return dequeued_list_head;
 }
 
 void queue_print(queue q) {
@@ -242,94 +258,25 @@ void queue_print(queue q) {
     i = 0;
     each = q->first;
     
-    printk(KERN_WARNING "summary of current queue:\n");
     while (each != NULL) {
-        printk(KERN_WARNING "queue[%d], => %d page, %d data_size\n", i, each->num_pages, each->data_size);
-        printk(KERN_WARNING "\n");
+        printk(KERN_WARNING "%dth q_item, size = %ld", i, each->size);
         each = each->next;
         i += 1;
-        
-        if (i > 10) {
-            printk(KERN_WARNING "\n");
-            printk(KERN_WARNING "===Something goes wrong===\n");
-            printk(KERN_WARNING "\n");
-        }
     }
-    printk(KERN_WARNING "end of summary of current queue\n");
     printk(KERN_WARNING "\n");
 }
 
-int queue_size(queue q) {
-    return q->length;
-}
-
-
-void queue_read(queue q, char c) {
-    struct q_item *curr;
-    page_node *pg;
-    
-    char *a;
-    int offset;
-    
-    curr = q->first;
-    
-    if (curr->num_pages == 0 || curr->data_size % PAGE_SIZE == 0) {
-        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
-        pg->page = alloc_page(GFP_KERNEL);
-        INIT_LIST_HEAD(&pg->list);
-        printk(KERN_WARNING "before adding new page, num_pages = %d\n", curr->num_pages);
-        list_add_tail(&pg->list, &curr->mem_list);
-        curr->num_pages += 1;
-        printk(KERN_WARNING "after adding new page, num_pages = %d\n", curr->num_pages);
-    }
-    
-    offset = curr->data_size % PAGE_SIZE;
-    //list_for_each_entry_reverse(pos, head, member)
-    
-    list_for_each_entry_reverse(pg, &curr->mem_list, list) {
-        a = (char *)(page_address(pg->page) + offset);
-        *a = c;
-        curr->data_size += 1;
-        break;
-    }
-    
-}
-
-
-/*free all in queue*/
 void queue_free(queue q) {
     q_item each;
-    struct page_node_rec *pnode, *pnode_next;
-    int count;
-    int index;
-    
-    index = 0;
-    printk(KERN_WARNING "===free all q_items in queues===\n");
     while (q->first != NULL) {
         each = q->first;
         q->first = q->first->next;
-        // free each mem_list
-        printk(KERN_WARNING "=free %dth q_item in queue=\n", index);
-        count = 0;
-        if (!list_empty(&each->mem_list)) {
-            list_for_each_entry_safe(pnode, pnode_next, &each->mem_list, list) {
-                __free_page(pnode->page);
-                list_del(&pnode->list);
-                kfree(pnode);
-                printk(KERN_WARNING "freed %d: page\n", count);
-                count += 1;
-            }
-        }
         kfree(each);
-        
-        printk(KERN_WARNING "=end of free %dth q_item in queue=\n", index);
-        index += 1;
     }
     kfree(q);
-    printk(KERN_WARNING "===end of free all q_items in queue===\n");
 }
 
-/*======*/
+/*===============================================*/
 
 /*helper function on my buffer*/
 buffer circular_buffer_new(void) {
@@ -393,8 +340,11 @@ void circular_buffer_print(void) {
 
 /*define my tasklet and tasklet handler*/
 void my_tasklet_handler(unsigned long tasklet_data) {
-    
+    int offset;
     char c;
+    char *a;
+    page_node *pnode;
+    
     printk(KERN_WARNING "\n");
     printk(KERN_WARNING "=executing tasklet handler...=\n");
     printk(KERN_WARNING "bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
@@ -407,16 +357,27 @@ void my_tasklet_handler(unsigned long tasklet_data) {
         if (c) {
             printk(KERN_WARNING "read out c = %c from circular buffer\n", c);
             printk(KERN_WARNING "after reading, bf->head = %d, bf->tail = %d\n", bf->head, bf->tail);
-            // at bottom half, read data from circular buffer into page pool
             
-            queue_read(q, c);
+            // at bottom half, read data from circular buffer into page pool
+            offset = current_processing_file_size % PAGE_SIZE;
+            
+            list_for_each_entry_reverse(pnode, &asgn2_device.mem_list , list) {
+                a = (char *) (page_address(pnode->page) + offset);
+                *a = c;
+                current_processing_file_size += 1;
+                break;
+            }
             
             printk(KERN_WARNING "=next, read data from page pool=\n");
             printk(KERN_WARNING "\n");
         } else {
             printk(KERN_WARNING "\n meet the end of file\n");
-            printk(KERN_WARNING "need to create a new mem_list in queue\n");
-            enqueue(q);
+            printk(KERN_WARNING "record down the current file size: %ld\n", current_processing_file_size);
+            enqueue(q, current_processing_file_size);
+            asgn2_device.data_size += current_processing_file_size;
+            
+            current_processing_file_size = 0;
+            add_pages(1);
             printk(KERN_WARNING "after enqueue, the length of the queue is %d\n\n", q->length);
             queue_print(q);
         }
@@ -448,21 +409,6 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
 /*==========================================================================*/
 /*==========================================================================*/
 
-typedef struct asgn2_dev_t {
-    dev_t dev;            /* the device */
-    struct cdev *cdev;
-    struct list_head mem_list;
-    int num_pages;        /* number of memory pages this module currently holds */
-    size_t data_size;     /* total data size in this module */
-    atomic_t nprocs;      /* number of processes accessing this device */
-    atomic_t max_nprocs;  /* max number of processes accessing this device */
-    struct kmem_cache *cache;      /* cache memory */
-    struct class *class;     /* the udev class */
-    struct device *device;   /* the udev device node */
-} asgn2_dev;
-
-asgn2_dev asgn2_device;
-
 
 int asgn2_major = 0;                      /* major number of module */
 int asgn2_minor = 0;                      /* minor number of module */
@@ -470,33 +416,10 @@ int asgn2_dev_count = 1;                  /* number of devices */
 
 struct proc_dir_entry *proc;                /*for proc entry*/
 
-/**
- * Helper function which add a page and set the data_size
- */
-void add_pages(int num) {
-    int i;
-    
-    for (i = 0; i < num; i++) {
-        page_node *pg;
-        pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
-        pg->page = alloc_page(GFP_KERNEL);
-        INIT_LIST_HEAD(&pg->list);
-        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
-        list_add_tail(&pg->list, &asgn2_device.mem_list);
-        asgn2_device.num_pages += 1;
-        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
-    }
-    
-}
 
-
-/**
- * This function frees all memory pages held by the module.
- */
-void free_memory_pages(struct asgn2_dev_t *dev) {
-    
+void free_memory_pages(struct asgn2_dev_t *dev, int free_num_of_pages, long data_size) {
     struct page_node_rec *page_node_current_ptr, *page_node_next_ptr;
-    int count = 1;
+    int count = 0;
     if (!list_empty(&dev->mem_list)) {
         list_for_each_entry_safe(page_node_current_ptr, page_node_next_ptr, &dev->mem_list, list) {
             __free_page(page_node_current_ptr->page);
@@ -505,9 +428,12 @@ void free_memory_pages(struct asgn2_dev_t *dev) {
             
             printk(KERN_WARNING "freed %d: page\n", count);
             count += 1;
+            if (count == free_num_of_pages) {
+                break;
+            }
         }
-        dev->num_pages = 0;
-        dev->data_size = 0;
+        dev->num_pages -= free_num_of_pages;
+        dev->data_size -= data_size;
     }
 }
 
@@ -549,7 +475,7 @@ int asgn2_open(struct inode *inode, struct file *filp) {
     }
     
     if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
-        free_memory_pages(&asgn2_device);
+        free_memory_pages(&asgn2_device, asgn2_device.num_pages, asgn2_device.data_size);
     }
     
     return 0; /* success */
@@ -594,84 +520,106 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct page_node_rec *page_ptr;
     int processing_count;
     
+    int need_free_pages;
+    
     //dev = filp->private_data;
     total_finished = 0;
     processing_count = 0;
     
+    if (*f_pos == 0) {
+        file_size = dequeue(q);
+    }
+    
+    printk(KERN_WARNING "from dequeue, file_size need to read is: %ld, %d files left\n", file_size, q->length);
+    
     printk(KERN_WARNING "======READING========\n");
     printk(KERN_WARNING "*f_pos = %ld\n", (long) *f_pos);
     
-    /*if the seeking position is bigger than the data_size, return 0*/
-    if (*f_pos >= asgn2_device.data_size) {
-        return 0;
-    }
-    
-    page_index = *f_pos / PAGE_SIZE;
-    offset = *f_pos % PAGE_SIZE;
-    curr_page_index = 0;
-    
-    /*check the limit of amount of work needed to be done*/
-    if (*f_pos + count > asgn2_device.data_size) {
-        unfinished = asgn2_device.data_size - *f_pos;
-    } else {
-        unfinished = count;
-    }
-    
-    ptr = asgn2_device.mem_list.next;
-    /*make sure the current operating page is the page computed from *f_pos / PAGE_SIZE*/
-    while (curr_page_index < page_index) {
-        ptr = ptr->next;
-        curr_page_index += 1;
-    }
-    
-    
-    printk(KERN_WARNING "unfinished = %d\n", unfinished);
-    
-    do {
+    if (file_size > 0) {
+        if (file_size % PAGE_SIZE != 0) {
+            need_free_pages = file_size / PAGE_SIZE + 1;
+        } else {
+            need_free_pages = file_size / PAGE_SIZE;
+        }
+        
+        /*if the seeking position is bigger than the data_size, return 0*/
+        if (*f_pos >= file_size) {
+            return 0;
+        }
+        
         page_index = *f_pos / PAGE_SIZE;
         offset = *f_pos % PAGE_SIZE;
+        curr_page_index = 0;
         
-        printk(KERN_WARNING "curr_page_index = %d\n", curr_page_index);
-        printk(KERN_WARNING "page_index = %d\n", page_index);
-        printk(KERN_WARNING "offset = %d\n", offset);
+        /*check the limit of amount of work needed to be done*/
+        if (*f_pos + count > file_size) {
+            unfinished = file_size - *f_pos;
+        } else {
+            unfinished = count;
+        }
         
-        if (page_index != curr_page_index) {
-            printk(KERN_WARNING "curr_page_index = %d, *f_pos / PAGE_SIZE = page_index = %d", curr_page_index, page_index);
+        ptr = asgn2_device.mem_list.next;
+        /*make sure the current operating page is the page computed from *f_pos / PAGE_SIZE*/
+        while (curr_page_index < page_index) {
             ptr = ptr->next;
             curr_page_index += 1;
-            printk(KERN_WARNING "go to next page: %d\n", curr_page_index);
         }
         
-        page_ptr = list_entry(ptr, page_node, list);
-        if (unfinished > PAGE_SIZE - offset) {
-            printk(KERN_WARNING "processing %ld amout of data(PAGE_SIZE - offset)\n", (long)(PAGE_SIZE - offset));
-            result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
-            finished = PAGE_SIZE - offset -result;
-        } else {
-            printk(KERN_WARNING "processing %ld amout of data(unfinished)\n", (long int)unfinished);
-            result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
-            finished = unfinished - result;
-        }
         
-        if (result < 0) {
-            break;
-        }
-        
-        processing_count += 1;
-        unfinished -= finished;
-        total_finished += finished;
-        *f_pos += finished;
-        
-        printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
-        printk(KERN_WARNING "finished = %d\n", finished);
         printk(KERN_WARNING "unfinished = %d\n", unfinished);
-        printk(KERN_WARNING "total_finished = %d\n", total_finished);
-        printk(KERN_WARNING "\n");
-    } while (unfinished >0);
-    
-    printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-    printk(KERN_WARNING "\n\n\n");
-    return total_finished;
+        
+        do {
+            page_index = *f_pos / PAGE_SIZE;
+            offset = *f_pos % PAGE_SIZE;
+            
+            printk(KERN_WARNING "curr_page_index = %d\n", curr_page_index);
+            printk(KERN_WARNING "page_index = %d\n", page_index);
+            printk(KERN_WARNING "offset = %d\n", offset);
+            
+            if (page_index != curr_page_index) {
+                printk(KERN_WARNING "curr_page_index = %d, *f_pos / PAGE_SIZE = page_index = %d", curr_page_index, page_index);
+                ptr = ptr->next;
+                curr_page_index += 1;
+                printk(KERN_WARNING "go to next page: %d\n", curr_page_index);
+            }
+            
+            page_ptr = list_entry(ptr, page_node, list);
+            if (unfinished > PAGE_SIZE - offset) {
+                printk(KERN_WARNING "processing %ld amout of data(PAGE_SIZE - offset)\n", (long)(PAGE_SIZE - offset));
+                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
+                finished = PAGE_SIZE - offset -result;
+            } else {
+                printk(KERN_WARNING "processing %ld amout of data(unfinished)\n", (long int)unfinished);
+                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
+                finished = unfinished - result;
+            }
+            
+            if (result < 0) {
+                break;
+            }
+            
+            processing_count += 1;
+            unfinished -= finished;
+            total_finished += finished;
+            *f_pos += finished;
+            
+            printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
+            printk(KERN_WARNING "finished = %d\n", finished);
+            printk(KERN_WARNING "unfinished = %d\n", unfinished);
+            printk(KERN_WARNING "total_finished = %d\n", total_finished);
+            printk(KERN_WARNING "\n");
+        } while (unfinished >0);
+        
+        printk(KERN_WARNING "free the associated page and reduce data size");
+        free_memory_pages(&asgn2_device, need_free_pages, total_finished);
+        
+        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
+        printk(KERN_WARNING "\n\n\n");
+        return total_finished;
+    } else {
+        // need wait untail there are data in page_pool
+        return 0;
+    }
 }
 
 
@@ -910,7 +858,7 @@ int __init asgn2_init_module(void){
 void __exit asgn2_exit_module(void){
     device_destroy(asgn2_device.class, MKDEV(asgn2_major, 0));
     class_destroy(asgn2_device.class);
-    free_memory_pages(&asgn2_device);
+    free_memory_pages(&asgn2_device, asgn2_device.num_pages, asgn2_device.data_size);
     
     cdev_del(asgn2_device.cdev);
     kfree(asgn2_device.cdev);
