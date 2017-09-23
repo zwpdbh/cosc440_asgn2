@@ -171,11 +171,14 @@ void add_pages(int num) {
         pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
         pg->page = alloc_page(GFP_KERNEL);
         INIT_LIST_HEAD(&pg->list);
+        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
         list_add_tail(&pg->list, &asgn2_device.mem_list);
         asgn2_device.num_pages += 1;
+        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
     }
     
 }
+
 
 /*===============================================*/
 typedef struct q_item *q_item;
@@ -496,6 +499,7 @@ int asgn2_release (struct inode *inode, struct file *filp) {
 }
 
 
+
 /**
  * This function reads contents of the virtual disk and writes to the user
  */
@@ -516,7 +520,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct page_node_rec *page_ptr;
     int processing_count;
     
-    
     //dev = filp->private_data;
     total_finished = 0;
     processing_count = 1;
@@ -526,7 +529,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     printk(KERN_WARNING "======READING========\n");
     printk(KERN_WARNING "count = %ld", (long int)count);
     
-    printk(KERN_WARNING "*f_pos = %ld\n", (long) *f_pos);
+    printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
     
     if (*f_pos + count > q->first->length) {
         unfinished = q->first->length;
@@ -560,8 +563,9 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
             printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
             /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
-            page_index = ((asgn2_device.tail + *f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) / PAGE_SIZE;
-            offset = ((asgn2_device.tail + *f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) % PAGE_SIZE;
+            
+            page_index = ((asgn2_device.tail + (unsigned long)*f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) / PAGE_SIZE;
+            offset = ((asgn2_device.tail + (unsigned long)*f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) % PAGE_SIZE;
             
             if (page_index != curr_page_index) {
                 ptr = ptr->next;
@@ -599,6 +603,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         
         asgn2_device.tail += total_finished;
         asgn2_device.tail = asgn2_device.tail % (PAGE_SIZE * asgn2_device.num_pages);
+        
         printk(KERN_WARNING "before update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
         asgn2_device.data_size -= total_finished;
         printk(KERN_WARNING "after update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
@@ -623,7 +628,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         printk(KERN_WARNING "\n\n\n");
         return 0;
     }
-    
 }
 
 
@@ -831,8 +835,6 @@ int __init asgn2_init_module(void){
     INIT_LIST_HEAD(&asgn2_device.mem_list);
     asgn2_device.num_pages = 0;
     asgn2_device.data_size = 0;
-    asgn2_device.head = 0;
-    asgn2_device.tail = 0;
     atomic_set(&asgn2_device.nprocs, 0);
     atomic_set(&asgn2_device.max_nprocs, 5);
     
@@ -865,8 +867,6 @@ int __init asgn2_init_module(void){
     
     /*initialize GPIO device*/
     printk(KERN_WARNING "creating GPIO device\n");
-    printk(KERN_WARNING "initializing 10 pages\n");
-    add_pages(10);
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
     
