@@ -178,6 +178,74 @@ void add_pages(int num) {
 }
 
 /*===============================================*/
+typedef struct q_item *q_item;
+typedef struct queue *queue;
+
+/* length: the length of file */
+struct q_item {
+    unsigned long length;
+    q_item next;
+};
+
+
+struct queue {
+    q_item first;
+    q_item last;
+    int size;
+};
+
+queue q;
+
+queue queue_new(void) {
+    queue q = kmalloc(sizeof(*q), GFP_KERNEL);
+    q->first = NULL;
+    q->last = NULL;
+    q->size = 0;
+    
+    return q;
+}
+
+void enqueue(queue q) {
+    if (q->size == 0) {
+        q->first = kmalloc(sizeof(struct q_item), GFP_KERNEL);
+        q->first->next = NULL;
+        q->last = q->first;
+        
+        q->first->length = 0;
+        
+    } else {
+        q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
+        q->last = q->last->next;
+        q->last->length = 0;
+        q->last->next = NULL;
+    }
+    
+    q->size += 1;
+}
+
+void dequeue(queue q) {
+    
+    q_item tmp;
+    
+    if (q->size > 0) {
+        tmp = q->first;
+        q->first = q->first->next;
+        kfree(tmp);
+        q->size -= 1;
+    }
+}
+
+void queue_free(queue q) {
+    q_item each;
+    while (q->first != NULL) {
+        each = q->first;
+        q->first = q->first->next;
+        kfree(each);
+    }
+    kfree(q);
+}
+
+/*===============================================*/
 
 /*define my circular buffer*/
 typedef struct circular_buffer *buffer;
@@ -203,10 +271,13 @@ buffer circular_buffer_new(void) {
 /*helper function write one byte*/
 void circular_buffer_write(char data) {
     char *a;
+    
+    
     if((bf->head+1) % PAGE_SIZE == bf->tail) {
         printk(KERN_WARNING "circular buffer is full, just return\n");
         return;
     }
+    
     
     
     a=(char*)(page_address(bf->page)+bf->head);
@@ -264,17 +335,20 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     
     page_node *p;
     
+    
     if(bf->tail == bf->head) {
         /* becuase bf->tail == bf->head, circular buffer is empty, just return,
-         * no schedule tasklet
-         */
+         * no schedule tasklet */
+        printk(KERN_WARNING "at bottom half: becuase bf->tail == bf->head, circular buffer is empty, just retur\n");
         return;
     }
     
     c =  circular_buffer_read();
-    write_pos = asgn2_device.head + 1;
-    /* write c into circular page */
-    if ((write_pos) % (PAGE_SIZE * asgn2_device.num_pages) == asgn2_device.tail) {
+    
+    write_pos = (asgn2_device.head + 1) % (PAGE_SIZE * asgn2_device.num_pages);
+    
+    /* prepare to write c into circular page */
+    if (write_pos == asgn2_device.tail) {
         printk(KERN_WARNING "page pool is full\n");
         return;
     }
@@ -282,7 +356,8 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     page_index = write_pos / PAGE_SIZE;
     offset = write_pos % PAGE_SIZE;
     
-    /*loop to that position*/
+    /*loop to that position and write c in page*/
+    /*later change it to use a page to hold the specific page if it is too slow*/
     index = 0;
     list_for_each_entry(p, &asgn2_device.mem_list, list) {
         if (index == page_index) {
@@ -291,11 +366,15 @@ void my_tasklet_handler(unsigned long tasklet_data) {
             
             asgn2_device.head += 1;
             asgn2_device.data_size += 1;
-            asgn2_device.head = asgn2_device.head % PAGE_SIZE;
+            asgn2_device.head = asgn2_device.head % (PAGE_SIZE * asgn2_device.num_pages);
             break;
         }
         index += 1;
     }
+    
+    /*update queue record*/
+    q->last->length += 1;
+    
 }
 
 DECLARE_TASKLET(my_tasklet, my_tasklet_handler, 0);
@@ -304,14 +383,20 @@ u8 msbit=0;
 
 int odd=1;
 
+/* top half */
 irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
     u8 half=read_half_byte();
     if(odd){
         msbit=half;
     }else{
-        char ascii=(char)msbit<<4|half;
-        circular_buffer_write(ascii);
-        tasklet_schedule(&my_tasklet);
+        char ascii = (char)msbit<<4|half;
+        if (ascii) {
+            circular_buffer_write(ascii);
+            tasklet_schedule(&my_tasklet);
+        } else {
+            enqueue(q);
+        }
+        
     }
     odd=!odd;
     return IRQ_HANDLED;
@@ -411,7 +496,6 @@ int asgn2_release (struct inode *inode, struct file *filp) {
 }
 
 
-
 /**
  * This function reads contents of the virtual disk and writes to the user
  */
@@ -424,7 +508,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     size_t result;
     size_t finished;
     size_t total_finished;
-    size_t file_size;
     
     int page_index;
     int curr_page_index;
@@ -436,16 +519,111 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     
     //dev = filp->private_data;
     total_finished = 0;
-    processing_count = 0;
-    file_size = 0;
+    processing_count = 1;
     
     
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "======READING========\n");
     printk(KERN_WARNING "count = %ld", (long int)count);
+    
     printk(KERN_WARNING "*f_pos = %ld\n", (long) *f_pos);
     
-    return 0;
+    if (*f_pos + count > q->first->length) {
+        unfinished = q->first->length;
+    } else {
+        unfinished = count;
+    }
+    
+    if (q->first->length > 0) {
+        if (*f_pos > q->first->length) {
+            return 0;
+        }
+        
+        printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
+        
+        page_index = (asgn2_device.tail + *f_pos) / PAGE_SIZE;
+        offset = (asgn2_device.tail + *f_pos) % PAGE_SIZE;
+        
+        curr_page_index = 0;
+        
+        
+        ptr = asgn2_device.mem_list.next;
+        while (curr_page_index < page_index) {
+            ptr = ptr->next;
+            curr_page_index += 1;
+        }
+        
+        printk(KERN_WARNING "unfinished = %d\n", unfinished);
+        printk(KERN_WARNING "\n");
+        
+        do {
+            printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
+            printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
+            /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
+            page_index = ((asgn2_device.tail + *f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) / PAGE_SIZE;
+            offset = ((asgn2_device.tail + *f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) % PAGE_SIZE;
+            
+            if (page_index != curr_page_index) {
+                ptr = ptr->next;
+                curr_page_index += 1;
+            }
+            
+            page_ptr = list_entry(ptr, page_node, list);
+            if (unfinished > PAGE_SIZE - offset) {
+                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
+                finished = PAGE_SIZE - offset -result;
+                printk(KERN_WARNING "finished (PAGE_SIZE - offset) = %lu\n", (unsigned long) finished);
+            } else {
+                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
+                finished = unfinished - result;
+                printk(KERN_WARNING "finished (unfinished) = %lu\n", (unsigned long) finished);
+            }
+            
+            if (result < 0) {
+                break;
+            }
+            
+            processing_count += 1;
+            unfinished -= finished;
+            total_finished += finished;
+            *f_pos += finished;
+            q->first->length -= finished;
+            
+            
+            printk(KERN_WARNING "unfinished = %d\n", unfinished);
+            printk(KERN_WARNING "total_finished = %d\n", total_finished);
+            printk(KERN_WARNING "q->first->length = %lu\n", q->first->length);
+            printk(KERN_WARNING "\n");
+            
+        } while (unfinished > 0);
+        
+        asgn2_device.tail += total_finished;
+        asgn2_device.tail = asgn2_device.tail % (PAGE_SIZE * asgn2_device.num_pages);
+        printk(KERN_WARNING "before update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
+        asgn2_device.data_size -= total_finished;
+        printk(KERN_WARNING "after update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
+        
+        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
+        printk(KERN_WARNING "\n\n\n");
+        return total_finished;
+        
+    } else if (q->first->length == 0) {
+        if (q->size > 1) {
+            dequeue(q);
+        }
+        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
+        printk(KERN_WARNING "\n\n\n");
+        
+        return 0;
+    }
+    else {
+        /*consider the read data is not ready */
+        printk(KERN_WARNING "consider the read data is not ready\n");
+        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
+        printk(KERN_WARNING "\n\n\n");
+        return 0;
+    }
+    
 }
 
 
@@ -528,12 +706,24 @@ int my_seq_show(struct seq_file *s, void *v) {
     /**
      * use seq_printf to print some info to s
      */
+    q_item each;
+    int i;
+    
     seq_printf(s, "dev->nprocs = %d\n", atomic_read(&asgn2_device.nprocs));
     seq_printf(s, "dev->max_nprocs = %d\n", atomic_read(&asgn2_device.max_nprocs));
     seq_printf(s, "dev->num_pages = %d\n", asgn2_device.num_pages);
     seq_printf(s, "dev->data_size = %d\n", asgn2_device.data_size);
     seq_printf(s, "dev->head = %lu\n", asgn2_device.head);
     seq_printf(s, "dev->tail = %lu\n", asgn2_device.tail);
+    
+    i = 0;
+    each = q->first;
+    
+    while (each != NULL) {
+        seq_printf(s, "index: %d, length: %ld\n", i, each->length);
+        each = each->next;
+        i += 1;
+    }
     
     return 0;
 }
@@ -592,6 +782,8 @@ int gpio_dummy_init(void)
     write_to_gpio(15);
     
     bf = circular_buffer_new();
+    q = queue_new();
+    enqueue(q);
     
     return 0;
     
@@ -639,6 +831,8 @@ int __init asgn2_init_module(void){
     INIT_LIST_HEAD(&asgn2_device.mem_list);
     asgn2_device.num_pages = 0;
     asgn2_device.data_size = 0;
+    asgn2_device.head = 0;
+    asgn2_device.tail = 0;
     atomic_set(&asgn2_device.nprocs, 0);
     atomic_set(&asgn2_device.max_nprocs, 5);
     
@@ -696,6 +890,7 @@ void __exit asgn2_exit_module(void){
     printk(KERN_WARNING "===release GPIO device\n");
     gpio_dummy_exit();
     circular_buffer_free(bf);
+    queue_free(q);
     printk(KERN_WARNING "===GOOD BYE from %s===\n", MYDEV_NAME);
     
 }
