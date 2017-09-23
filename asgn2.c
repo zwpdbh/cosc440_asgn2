@@ -565,12 +565,21 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
             /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
             
-            page_index = ((asgn2_device.tail + (unsigned long)*f_pos) % asgn2_device.total_size) / PAGE_SIZE;
-            offset = ((asgn2_device.tail + (unsigned long)*f_pos) % asgn2_device.total_size) % PAGE_SIZE;
+            page_index = (asgn2_device.tail + (unsigned long)*f_pos) / PAGE_SIZE;
+            offset = (asgn2_device.tail + (unsigned long)*f_pos) % PAGE_SIZE;
+            printk(KERN_WARNING "page_index = %d\n", page_index);
+            printk(KERN_WARNING "offset = %d\n", offset);
             
             if (page_index != curr_page_index) {
-                ptr = ptr->next;
-                curr_page_index += 1;
+                printk(KERN_WARNING "page_index != curr_page_index = %d, go to next page\n", curr_page_index);
+                if (page_index == asgn2_device.num_pages) {
+                    // if it reaches the last page, go back to first page
+                    ptr = asgn2_device.mem_list.next;
+                    curr_page_index = 0;
+                } else {
+                    ptr = ptr->next;
+                    curr_page_index += 1;
+                }
             }
             
             page_ptr = list_entry(ptr, page_node, list);
