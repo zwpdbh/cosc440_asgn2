@@ -543,7 +543,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             return 0;
         }
         
-        printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
+        printk(KERN_WARNING "*f_pos = %ld\n", (unsigned long) *f_pos);
         
         page_index = (asgn2_device.tail + (unsigned long)*f_pos) / PAGE_SIZE;
         offset = (asgn2_device.tail + (unsigned long)*f_pos) % PAGE_SIZE;
@@ -565,8 +565,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
             /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
             
-            page_index = ((asgn2_device.tail + *f_pos) % asgn2_device.total_size) / PAGE_SIZE;
-            offset = ((asgn2_device.tail + *f_pos) % asgn2_device.total_size) % PAGE_SIZE;
+            page_index = ((asgn2_device.tail + (unsigned long)*f_pos) % asgn2_device.total_size) / PAGE_SIZE;
+            offset = ((asgn2_device.tail + (unsigned long)*f_pos) % asgn2_device.total_size) % PAGE_SIZE;
             
             if (page_index != curr_page_index) {
                 ptr = ptr->next;
@@ -725,7 +725,7 @@ int my_seq_show(struct seq_file *s, void *v) {
     each = q->first;
     
     while (each != NULL) {
-        seq_printf(s, "index: %d, length: %ld\n", i, each->length);
+        seq_printf(s, "index: %d, length: %lu\n", i, each->length);
         each = each->next;
         i += 1;
     }
