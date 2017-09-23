@@ -151,6 +151,7 @@ typedef struct asgn2_dev_t {
     struct device *device;   /* the udev device node */
     unsigned long head;
     unsigned long tail;
+    unsigned long total_size;
 } asgn2_dev;
 
 asgn2_dev asgn2_device;
@@ -348,7 +349,7 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     
     c =  circular_buffer_read();
     
-    write_pos = (asgn2_device.head + 1) % (PAGE_SIZE * asgn2_device.num_pages);
+    write_pos = (asgn2_device.head + 1) % asgn2_device.total_size;
     
     /* prepare to write c into circular page */
     if (write_pos == asgn2_device.tail) {
@@ -362,6 +363,7 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     /*loop to that position and write c in page*/
     /*later change it to use a page to hold the specific page if it is too slow*/
     index = 0;
+    
     list_for_each_entry(p, &asgn2_device.mem_list, list) {
         if (index == page_index) {
             a = (char *)(page_address(p->page) + offset);
@@ -369,7 +371,7 @@ void my_tasklet_handler(unsigned long tasklet_data) {
             
             asgn2_device.head += 1;
             asgn2_device.data_size += 1;
-            asgn2_device.head = asgn2_device.head % (PAGE_SIZE * asgn2_device.num_pages);
+            asgn2_device.head = asgn2_device.head % asgn2_device.total_size;
             break;
         }
         index += 1;
@@ -524,7 +526,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     total_finished = 0;
     processing_count = 1;
     
-    
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "======READING========\n");
     printk(KERN_WARNING "count = %ld", (long int)count);
@@ -544,8 +545,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         
         printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
         
-        page_index = (asgn2_device.tail + *f_pos) / PAGE_SIZE;
-        offset = (asgn2_device.tail + *f_pos) % PAGE_SIZE;
+        page_index = (asgn2_device.tail + (unsigned long)*f_pos) / PAGE_SIZE;
+        offset = (asgn2_device.tail + (unsigned long)*f_pos) % PAGE_SIZE;
         
         curr_page_index = 0;
         
@@ -564,8 +565,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
             /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
             
-            page_index = ((asgn2_device.tail + (unsigned long)*f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) / PAGE_SIZE;
-            offset = ((asgn2_device.tail + (unsigned long)*f_pos) % (asgn2_device.num_pages * PAGE_SIZE)) % PAGE_SIZE;
+            page_index = ((asgn2_device.tail + *f_pos) % asgn2_device.total_size) / PAGE_SIZE;
+            offset = ((asgn2_device.tail + *f_pos) % asgn2_device.total_size) % PAGE_SIZE;
             
             if (page_index != curr_page_index) {
                 ptr = ptr->next;
@@ -602,7 +603,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         } while (unfinished > 0);
         
         asgn2_device.tail += total_finished;
-        asgn2_device.tail = asgn2_device.tail % (PAGE_SIZE * asgn2_device.num_pages);
+        asgn2_device.tail = asgn2_device.tail % asgn2_device.total_size;
         
         printk(KERN_WARNING "before update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
         asgn2_device.data_size -= total_finished;
@@ -835,6 +836,9 @@ int __init asgn2_init_module(void){
     INIT_LIST_HEAD(&asgn2_device.mem_list);
     asgn2_device.num_pages = 0;
     asgn2_device.data_size = 0;
+    asgn2_device.head = 0;
+    asgn2_device.tail = 0;
+    asgn2_device.total_size = 0;
     atomic_set(&asgn2_device.nprocs, 0);
     atomic_set(&asgn2_device.max_nprocs, 5);
     
@@ -867,6 +871,9 @@ int __init asgn2_init_module(void){
     
     /*initialize GPIO device*/
     printk(KERN_WARNING "creating GPIO device\n");
+    printk(KERN_WARNING "initializing 10 pages\n");
+    add_pages(10);
+    asgn2_device.total_size = asgn2_device.num_pages * PAGE_SIZE;
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
     
