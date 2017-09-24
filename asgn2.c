@@ -256,6 +256,8 @@ void queue_free(queue q) {
 wait_queue_head_t wq;
 DECLARE_WAIT_QUEUE_HEAD(wq);
 
+wait_queue_head_t access_wq;
+DECLARE_WAIT_QUEUE_HEAD(access_wq);
 
 
 /*===============================================*/
@@ -460,7 +462,6 @@ void free_memory_pages(struct asgn2_dev_t *dev, int free_num_of_pages, long data
     }
 }
 
-
 /**
  * This function opens the virtual disk, if it is opened in the write-only
  * mode, all memory pages will be freed.
@@ -473,34 +474,20 @@ void free_memory_pages(struct asgn2_dev_t *dev, int free_num_of_pages, long data
  * 4. allocate and fill any data structure to be put in filp->private_data
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
-    /* COMPLETE ME */
-    /**
-     * Increment process count, if exceeds max_nprocs, return -EBUSY
-     *
-     * if opened in write-only mode, free all memory pages
-     *
-     */
-    //    struct asgn2_dev_t *dev;
-    int nprocs;
-    int max_nprocs;
     
-    //    dev = container_of(inode->i_cdev, struct asgn2_dev_t, cdev);
-    //    filp->private_data = dev;
     filp->private_data = &asgn2_device;
     
+    /*only allow read operation*/
+    if ((filp->f_flags & O_ACCMODE) != O_RDONLY) {
+        return -1;
+    }
+    
+    if (atomic_read(&asgn2_device.nprocs) == 1) {
+        printk(KERN_WARNING "only one process can read at a time, put current access process into sleep\n");
+        wait_event_interruptible_exclusive(access_wq, atomic_read(&asgn2_device.nprocs) == 0);
+    }
     
     atomic_inc(&asgn2_device.nprocs);
-    
-    nprocs = atomic_read(&asgn2_device.nprocs);
-    max_nprocs = atomic_read(&asgn2_device.max_nprocs);
-    if (nprocs > max_nprocs) {
-        return -EBUSY;
-    }
-    
-    if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
-        free_memory_pages(&asgn2_device, asgn2_device.num_pages, asgn2_device.data_size);
-    }
-    
     return 0; /* success */
 }
 
@@ -517,7 +504,6 @@ int asgn2_release (struct inode *inode, struct file *filp) {
     if(atomic_read(&asgn2_device.nprocs) > 0) {
         atomic_sub(1, &asgn2_device.nprocs);
     }
-    
     return 0;
 }
 
@@ -685,9 +671,6 @@ long asgn2_ioctl (struct file *filp, unsigned cmd, unsigned long arg) {
     return -ENOTTY;
 }
 
-
-
-
 struct file_operations asgn2_fops = {
     .owner = THIS_MODULE,
     .read = asgn2_read,
@@ -850,7 +833,7 @@ int __init asgn2_init_module(void){
     asgn2_device.tail = 0;
     asgn2_device.total_size = 0;
     atomic_set(&asgn2_device.nprocs, 0);
-    atomic_set(&asgn2_device.max_nprocs, 5);
+    atomic_set(&asgn2_device.max_nprocs, 1);
     
     rv = cdev_add(asgn2_device.cdev, devno, 1);
     if (rv) {
@@ -882,7 +865,7 @@ int __init asgn2_init_module(void){
     /*initialize GPIO device*/
     printk(KERN_WARNING "creating GPIO device\n");
     printk(KERN_WARNING "initializing 10 pages\n");
-    add_pages(2);
+    add_pages(10);
     asgn2_device.total_size = asgn2_device.num_pages * PAGE_SIZE;
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
