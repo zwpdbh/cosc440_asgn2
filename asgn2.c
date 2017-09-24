@@ -253,10 +253,9 @@ void queue_free(queue q) {
 }
 
 /*==============================================*/
-wait_queue_head_t wq;
+
 DECLARE_WAIT_QUEUE_HEAD(wq);
 
-wait_queue_head_t access_wq;
 DECLARE_WAIT_QUEUE_HEAD(access_wq);
 
 
@@ -504,6 +503,7 @@ int asgn2_release (struct inode *inode, struct file *filp) {
     if(atomic_read(&asgn2_device.nprocs) > 0) {
         atomic_sub(1, &asgn2_device.nprocs);
     }
+    wake_up_interruptible(&access_wq);
     return 0;
 }
 
