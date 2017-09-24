@@ -33,7 +33,7 @@
 
 #define MYDEV_NAME "asgn2"
 #define MYIOC_TYPE 'k'
-
+#define CHECK_SIZE 100
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Zhao Wei");
@@ -172,10 +172,8 @@ void add_pages(int num) {
         pg = kmalloc(sizeof(struct page_node_rec), GFP_KERNEL);
         pg->page = alloc_page(GFP_KERNEL);
         INIT_LIST_HEAD(&pg->list);
-        printk(KERN_WARNING "before adding new page, num_pages = %d\n", asgn2_device.num_pages);
         list_add_tail(&pg->list, &asgn2_device.mem_list);
         asgn2_device.num_pages += 1;
-        printk(KERN_WARNING "after adding new page, num_pages = %d\n", asgn2_device.num_pages);
     }
     
 }
@@ -188,6 +186,7 @@ typedef struct queue *queue;
 /* length: the length of file */
 struct q_item {
     unsigned long length;
+    bool complete;
     q_item next;
 };
 
@@ -216,11 +215,15 @@ void enqueue(queue q) {
         q->last = q->first;
         
         q->first->length = 0;
+        q->first->complete = false;
         
     } else {
+        printk(KERN_WARNING "before enqueue, set previous file record as complete \n");
+        q->last->complete = true;
         q->last->next = kmalloc(sizeof(struct q_item), GFP_KERNEL);
         q->last = q->last->next;
         q->last->length = 0;
+        q->last->complete = false;
         q->last->next = NULL;
     }
     
@@ -248,6 +251,12 @@ void queue_free(queue q) {
     }
     kfree(q);
 }
+
+/*==============================================*/
+wait_queue_head_t wq;
+DECLARE_WAIT_QUEUE_HEAD(wq);
+
+
 
 /*===============================================*/
 
@@ -334,11 +343,9 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     char *a;
     int page_index;
     int offset;
-    int write_pos;
     int index;
     
     page_node *p;
-    
     
     if(bf->tail == bf->head) {
         /* becuase bf->tail == bf->head, circular buffer is empty, just return,
@@ -349,16 +356,15 @@ void my_tasklet_handler(unsigned long tasklet_data) {
     
     c =  circular_buffer_read();
     
-    write_pos = (asgn2_device.head + 1) % asgn2_device.total_size;
-    
     /* prepare to write c into circular page */
-    if (write_pos == asgn2_device.tail) {
+    if ((asgn2_device.head + 1) % asgn2_device.total_size == asgn2_device.tail) {
+        printk(KERN_WARNING "asgn2_device.head = %lu, asgn2_device.tail = %lu\n", asgn2_device.head, asgn2_device.tail);
         printk(KERN_WARNING "page pool is full\n");
         return;
     }
     
-    page_index = write_pos / PAGE_SIZE;
-    offset = write_pos % PAGE_SIZE;
+    page_index = (asgn2_device.head % asgn2_device.total_size) / PAGE_SIZE;
+    offset = (asgn2_device.head % asgn2_device.total_size) % PAGE_SIZE;
     
     /*loop to that position and write c in page*/
     /*later change it to use a page to hold the specific page if it is too slow*/
@@ -370,16 +376,25 @@ void my_tasklet_handler(unsigned long tasklet_data) {
             *a = c;
             
             asgn2_device.head += 1;
-            asgn2_device.data_size += 1;
             asgn2_device.head = asgn2_device.head % asgn2_device.total_size;
+            asgn2_device.data_size += 1;
             break;
         }
         index += 1;
     }
-    
     /*update queue record*/
     q->last->length += 1;
     
+    /* if the accumulative data is big enough, wake the sleeping process */
+    if (q->first->length % CHECK_SIZE == 0 || q->first->complete == true ) {
+        printk(KERN_WARNING "In bottom half:\n");
+        printk(KERN_DEBUG "q->first->length = %lu\n", q->first->length);
+        printk(KERN_DEBUG "q->first->complete == %d\n", q->first->complete);
+        printk(KERN_DEBUG "process %i (%s) awakening the readers...\n",
+               current->pid, current->comm);
+        printk(KERN_WARNING "\n");
+        wake_up_interruptible(&wq);
+    }
 }
 
 DECLARE_TASKLET(my_tasklet, my_tasklet_handler, 0);
@@ -399,7 +414,13 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
             circular_buffer_write(ascii);
             tasklet_schedule(&my_tasklet);
         } else {
+            /*when it meet the end of file*/
             enqueue(q);
+            /*meet one end of file, need to wake up*/
+            printk(KERN_WARNING "In the top hafl, meet one end of file, need to wake up\n");
+            printk(KERN_DEBUG "process %i (%s) awakening the readers...\n", current->pid, current->comm);
+            printk(KERN_WARNING "\n");
+            wake_up_interruptible(&wq);
         }
         
     }
@@ -516,81 +537,69 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     size_t total_finished;
     
     int page_index;
-    int curr_page_index;
+    int index;
     
-    struct list_head *ptr;
-    struct page_node_rec *page_ptr;
+    page_node *p;
+    
     int processing_count;
     
-    //dev = filp->private_data;
     total_finished = 0;
     processing_count = 1;
     
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "======READING========\n");
-    printk(KERN_WARNING "count = %ld", (long int)count);
+    
+    if (q->first->complete == false && q->first->length < CHECK_SIZE) {
+        printk(KERN_WARNING "No data available right now, put the current process into sleep\n");
+        printk(KERN_DEBUG "process %i (%s) going to sleep\n", current->pid, current->comm);
+        printk(KERN_DEBUG "\n");
+        wait_event_interruptible(wq, (q->first->complete == true || q->first->length > CHECK_SIZE));
+        printk(KERN_WARNING "==after waking from sleep==\n");
+    }
+    
     
     printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
+    printk(KERN_WARNING "q->first->length = %lu\n", q->first->length);
+    printk(KERN_WARNING "asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
+    printk(KERN_WARNING "asgn2_device.head = %lu\n", asgn2_device.head);
+    printk(KERN_WARNING "asgn2_device.tail = %lu\n", asgn2_device.tail);
     
     if (*f_pos + count > q->first->length) {
         unfinished = q->first->length;
     } else {
         unfinished = count;
     }
+    printk(KERN_WARNING "unfinished = %d\n", unfinished);
+    printk(KERN_WARNING "\n");
     
+    /*when there is some data to read*/
     if (q->first->length > 0) {
-        if (*f_pos > q->first->length) {
-            return 0;
-        }
-        
-        printk(KERN_WARNING "*f_pos = %ld\n", (unsigned long) *f_pos);
-        
-        page_index = (asgn2_device.tail + (unsigned long)*f_pos) / PAGE_SIZE;
-        offset = (asgn2_device.tail + (unsigned long)*f_pos) % PAGE_SIZE;
-        
-        curr_page_index = 0;
-        
-        
-        ptr = asgn2_device.mem_list.next;
-        while (curr_page_index < page_index) {
-            ptr = ptr->next;
-            curr_page_index += 1;
-        }
-        
-        printk(KERN_WARNING "unfinished = %d\n", unfinished);
-        printk(KERN_WARNING "\n");
+        printk(KERN_WARNING "===begin processing ===\n");
+        printk(KERN_DEBUG "unfinished = %d\n", unfinished);
         
         do {
-            printk(KERN_WARNING "===processing_count = %d===\n", processing_count);
-            printk(KERN_WARNING "*f_pos = %ld\n", (long int) *f_pos);
-            /*this is bug: the asgn2_device.tail and *f_pos are both moving*/
+            index = 0;
+            finished = 0;
+            printk(KERN_WARNING "==processing_count = %d==\n", processing_count);
+            printk(KERN_DEBUG "*f_pos = %ld\n", (long int) *f_pos);
             
-            page_index = (asgn2_device.tail + (unsigned long)*f_pos) / PAGE_SIZE;
-            offset = (asgn2_device.tail + (unsigned long)*f_pos) % PAGE_SIZE;
-            printk(KERN_WARNING "page_index = %d\n", page_index);
-            printk(KERN_WARNING "offset = %d\n", offset);
+            page_index = ((asgn2_device.tail) % asgn2_device.total_size) / PAGE_SIZE;
+            offset = ((asgn2_device.tail) % asgn2_device.total_size) % PAGE_SIZE;
             
-            if (page_index != curr_page_index) {
-                printk(KERN_WARNING "page_index != curr_page_index = %d, go to next page\n", curr_page_index);
-                if (page_index == asgn2_device.num_pages) {
-                    // if it reaches the last page, go back to first page
-                    ptr = asgn2_device.mem_list.next;
-                    curr_page_index = 0;
-                } else {
-                    ptr = ptr->next;
-                    curr_page_index += 1;
+            list_for_each_entry(p, &asgn2_device.mem_list, list) {
+                if (index == page_index) {
+                    if (unfinished > PAGE_SIZE - offset) {
+                        result = copy_to_user(buf + total_finished, (page_address(p->page) + offset), PAGE_SIZE - offset);
+                        finished = PAGE_SIZE - offset -result;
+                        printk(KERN_WARNING "finished (PAGE_SIZE - offset) = %lu\n", (unsigned long) finished);
+                    } else {
+                        result = copy_to_user(buf + total_finished, (page_address(p->page) + offset), unfinished);
+                        finished = unfinished - result;
+                        printk(KERN_WARNING "finished (unfinished) = %lu\n", (unsigned long) finished);
+                    }
+                    break;
                 }
-            }
-            
-            page_ptr = list_entry(ptr, page_node, list);
-            if (unfinished > PAGE_SIZE - offset) {
-                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), PAGE_SIZE - offset);
-                finished = PAGE_SIZE - offset -result;
-                printk(KERN_WARNING "finished (PAGE_SIZE - offset) = %lu\n", (unsigned long) finished);
-            } else {
-                result = copy_to_user(buf + total_finished, (page_address(page_ptr->page) + offset), unfinished);
-                finished = unfinished - result;
-                printk(KERN_WARNING "finished (unfinished) = %lu\n", (unsigned long) finished);
+                index += 1;
             }
             
             if (result < 0) {
@@ -603,41 +612,33 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
             *f_pos += finished;
             q->first->length -= finished;
             
+            asgn2_device.tail += finished;
+            asgn2_device.tail = asgn2_device.tail % asgn2_device.total_size;
+            printk(KERN_WARNING "asgn2_device.tail = %lu\n", asgn2_device.tail);
+            asgn2_device.data_size -= finished;
+            printk(KERN_WARNING "asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
             
-            printk(KERN_WARNING "unfinished = %d\n", unfinished);
-            printk(KERN_WARNING "total_finished = %d\n", total_finished);
-            printk(KERN_WARNING "q->first->length = %lu\n", q->first->length);
-            printk(KERN_WARNING "\n");
+            printk(KERN_DEBUG "unfinished = %d\n", unfinished);
+            printk(KERN_DEBUG "total_finished = %d\n", total_finished);
+            printk(KERN_DEBUG "q->first->length = %lu\n", q->first->length);
+            printk(KERN_DEBUG "\n");
             
         } while (unfinished > 0);
-        
-        asgn2_device.tail += total_finished;
-        asgn2_device.tail = asgn2_device.tail % asgn2_device.total_size;
-        
-        printk(KERN_WARNING "before update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
-        asgn2_device.data_size -= total_finished;
-        printk(KERN_WARNING "after update,  asgn2_device.data_size = %lu\n", (unsigned long)asgn2_device.data_size);
         
         printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
         printk(KERN_WARNING "\n\n\n");
         return total_finished;
-        
-    } else if (q->first->length == 0) {
-        if (q->size > 1) {
-            dequeue(q);
-        }
-        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-        printk(KERN_WARNING "\n\n\n");
-        
-        return 0;
+    } else {
+        printk(KERN_WARNING "because q->first->length <= 0, no further reading\n");
     }
-    else {
-        /*consider the read data is not ready */
-        printk(KERN_WARNING "consider the read data is not ready\n");
-        printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
-        printk(KERN_WARNING "\n\n\n");
-        return 0;
+    
+    if (q->first->length == 0 && q->first->complete == true) {
+        dequeue(q);
     }
+    
+    printk(KERN_WARNING "===END of READING, return %d===\n", total_finished);
+    printk(KERN_DEBUG "\n\n\n");
+    return 0;
 }
 
 
@@ -734,7 +735,7 @@ int my_seq_show(struct seq_file *s, void *v) {
     each = q->first;
     
     while (each != NULL) {
-        seq_printf(s, "index: %d, length: %lu\n", i, each->length);
+        seq_printf(s, "index: %d, length: %lu, complete: %d\n", i, each->length, each->complete);
         each = each->next;
         i += 1;
     }
@@ -881,7 +882,7 @@ int __init asgn2_init_module(void){
     /*initialize GPIO device*/
     printk(KERN_WARNING "creating GPIO device\n");
     printk(KERN_WARNING "initializing 10 pages\n");
-    add_pages(10);
+    add_pages(2);
     asgn2_device.total_size = asgn2_device.num_pages * PAGE_SIZE;
     printk(KERN_WARNING "\n\n\n");
     printk(KERN_WARNING "===Create %s driver succeed.===\n", MYDEV_NAME);
@@ -917,3 +918,4 @@ void __exit asgn2_exit_module(void){
 
 module_init(asgn2_init_module);
 module_exit(asgn2_exit_module);
+
